@@ -88,3 +88,33 @@ async def _parallel_fetch(labels: list[str], limit: int, offset: int):
         db.count_segments_for_labels(labels),
     )
     return segs, total
+
+
+@router.get("/skips/by-category")
+async def get_skip_counts_by_category():
+    """Return how many filter actions fired per content category."""
+    return {"categories": await db.get_skip_counts_by_category()}
+
+
+@router.get("/skips/by-client")
+async def get_skip_counts_by_client():
+    """Return per-client volume, failure rate and average latency, worst first."""
+    return {"clients": await db.get_skip_counts_by_client()}
+
+
+@router.get("/skips/top-titles")
+async def get_most_skipped_titles(limit: int = Query(20, ge=1, le=100)):
+    """Return the titles whose segments fire most often."""
+    return {"titles": await db.get_most_skipped_titles(limit)}
+
+
+@router.get("/skips/history")
+async def get_skip_history(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Return recent filter actions, newest first."""
+    return {
+        "events": await db.get_skip_events(limit, offset),
+        "total": await db.count_skip_events(),
+    }

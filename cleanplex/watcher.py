@@ -15,8 +15,13 @@ from .scanner import enqueue, enqueue_pending, scanner_loop
 
 logger = get_logger(__name__)
 
-# Ring buffer of recent skip events for the dashboard
+# Ring buffer of recent skip events for the live dashboard. The durable history
+# lives in the skip_events table; this is just the hot cache.
 skip_events: deque[dict] = deque(maxlen=50)
+
+# Floor for adaptive polling, so a session sitting right before a segment cannot
+# drive the poll rate high enough to hammer the Plex API.
+MIN_POLL_INTERVAL_S = 1.0
 
 
 async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
@@ -28,6 +33,7 @@ async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
             await asyncio.sleep(10)
             continue
 
+        sessions = []
         try:
             client = get_client_fn()
             sessions = await client.get_active_sessions()
@@ -62,8 +68,38 @@ async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
 
         except Exception as exc:
             logger.warning("Session watcher error: %s", exc)
+            sessions = []
 
-        await asyncio.sleep(config.poll_interval)
+        await asyncio.sleep(await _next_poll_delay(sessions, config))
+
+
+async def _next_poll_delay(sessions, config) -> float:
+    """Return how long to sleep before the next session poll.
+
+    Polling tightens as a session approaches a segment and relaxes when every
+    session is far from one. A fixed interval forces a trade between Plex API load
+    and skip precision; this gives precision only where it is needed.
+    """
+    delay = float(config.poll_interval)
+    if not sessions:
+        return delay
+
+    for session in sessions:
+        try:
+            segments = await db.get_segments_for_guid(session.plex_guid)
+            if not segments and session.rating_key:
+                segments = await db.get_segments_by_rating_key(session.rating_key)
+            upcoming = [
+                s["start_ms"] - config.pre_buffer_ms - session.position_ms
+                for s in segments
+                if s["start_ms"] - config.pre_buffer_ms > session.position_ms
+            ]
+            if upcoming:
+                delay = min(delay, max(MIN_POLL_INTERVAL_S, min(upcoming) / 1000.0))
+        except Exception as exc:
+            logger.debug("Could not compute poll delay for %s: %s", session.session_key, exc)
+
+    return max(MIN_POLL_INTERVAL_S, delay)
 
 
 async def _import_sidecar(item) -> bool:

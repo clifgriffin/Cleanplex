@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
@@ -477,6 +477,20 @@ async def jump_to_segment(segment_id: int):
         "client": target.client_title,
         "user": target.user,
     }
+
+
+@router.get("/segments/{segment_id}/vlc")
+async def vlc_segment(segment_id: int, request: Request):
+    """Return an M3U playlist that opens the segment source in VLC."""
+    seg = await db.get_segment_by_id(segment_id)
+    if not seg:
+        raise HTTPException(status_code=404, detail="Segment not found")
+    base = str(request.base_url).rstrip("/")
+    stream_url = f"{base}/api/segments/{segment_id}/stream"
+    title = seg.get("title") or "Segment"
+    m3u = f"#EXTM3U\n#EXTINF:-1,{title}\n{stream_url}\n"
+    return Response(content=m3u, media_type="audio/x-mpegurl",
+                    headers={"Content-Disposition": f'attachment; filename="segment_{segment_id}.m3u"'})
 
 
 @router.get("/segments/{segment_id}/stream")

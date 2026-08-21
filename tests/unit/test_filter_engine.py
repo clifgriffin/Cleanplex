@@ -47,6 +47,7 @@ def _make_client(seek_result: bool = True, volume_result: bool = True) -> MagicM
     client = MagicMock()
     client.seek = AsyncMock(return_value=seek_result)
     client.set_volume = AsyncMock(return_value=volume_result)
+    client._forget_profile = AsyncMock()
     return client
 
 
@@ -68,16 +69,18 @@ def _mock_db(mock_db, segments, prefs=None):
     mock_db.get_segments_for_guid = AsyncMock(return_value=segments)
     mock_db.get_segments_by_rating_key = AsyncMock(return_value=[])
     mock_db.get_user_category_prefs = AsyncMock(return_value=prefs or {})
+    mock_db.record_skip_event = AsyncMock(return_value=1)
     return mock_db
 
 
 @pytest.fixture(autouse=True)
 def reset_filter_state():
     """Clear global filter state before each test to prevent cross-test bleed."""
-    for state in (fe._recently_skipped, fe._seek_backoff_until, fe._muted_sessions):
+    states = (fe._recently_skipped, fe._seek_backoff_until, fe._muted_sessions, fe._pending_verification)
+    for state in states:
         state.clear()
     yield
-    for state in (fe._recently_skipped, fe._seek_backoff_until, fe._muted_sessions):
+    for state in states:
         state.clear()
 
 
@@ -440,3 +443,116 @@ async def test_user_action_override_turns_skip_into_mute():
 
     client.seek.assert_not_called()
     client.set_volume.assert_awaited()
+
+
+# ── Skip event recording (issue #69) ───────────────────────────────────────────
+
+async def test_successful_skip_is_recorded_with_category_and_latency():
+    session = _session(position_ms=35000)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000))
+        await fe.process(session, client)
+
+    mock_db.record_skip_event.assert_awaited_once()
+    kwargs = mock_db.record_skip_event.call_args.kwargs
+    assert kwargs["category"] == "nudity"
+    assert kwargs["success"] is True
+    assert kwargs["action"] == "skip"
+    assert kwargs["latency_ms"] >= 0
+
+
+async def test_failed_skip_is_recorded_as_a_failure():
+    session = _session(position_ms=35000)
+    client = _make_client(seek_result=False)
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000))
+        await fe.process(session, client)
+
+    assert mock_db.record_skip_event.call_args.kwargs["success"] is False
+
+
+async def test_mute_is_recorded_as_a_mute_event():
+    session = _session(position_ms=35000, volume=70)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000, action="mute", category="language"))
+        await fe.process(session, client)
+
+    assert mock_db.record_skip_event.call_args.kwargs["action"] == "mute"
+
+
+# ── Seek verification (issue #72) ──────────────────────────────────────────────
+
+async def test_seek_that_did_not_move_is_recorded_as_a_failure():
+    """A 2xx response is not proof: verify the position actually advanced."""
+    client = _make_client()
+    fe._pending_verification["sess-1"] = {
+        "target_ms": 30000, "category": "nudity", "segment_id": 7, "latency_ms": 12,
+    }
+    # Next tick, the client is still sitting where it was.
+    session = _session(position_ms=10000)
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, [])
+        await fe.process(session, client)
+
+    kwargs = mock_db.record_skip_event.call_args.kwargs
+    assert kwargs["success"] is False
+    assert kwargs["target_ms"] == 30000
+
+
+async def test_failed_verification_invalidates_the_client_profile():
+    client = _make_client()
+    fe._pending_verification["sess-1"] = {
+        "target_ms": 30000, "category": "nudity", "segment_id": None, "latency_ms": 5,
+    }
+    session = _session(position_ms=10000)
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, [])
+        await fe.process(session, client)
+
+    client._forget_profile.assert_awaited_once_with("client-abc")
+    assert "sess-1" not in fe._recently_skipped
+
+
+async def test_verified_seek_records_nothing_extra():
+    client = _make_client()
+    fe._pending_verification["sess-1"] = {
+        "target_ms": 30000, "category": "nudity", "segment_id": None, "latency_ms": 5,
+    }
+    session = _session(position_ms=31000)
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, [])
+        await fe.process(session, client)
+
+    mock_db.record_skip_event.assert_not_awaited()
+    client._forget_profile.assert_not_awaited()
+
+
+async def test_verification_tolerates_keyframe_snapping():
+    """Landing slightly short of the target is normal, not a failure."""
+    client = _make_client()
+    fe._pending_verification["sess-1"] = {
+        "target_ms": 30000, "category": "nudity", "segment_id": None, "latency_ms": 5,
+    }
+    session = _session(position_ms=29000)  # 1s short, inside tolerance
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, [])
+        await fe.process(session, client)
+
+    mock_db.record_skip_event.assert_not_awaited()
+
+
+async def test_verification_state_is_reaped_with_the_session():
+    fe._pending_verification["gone"] = {"target_ms": 1, "category": "", "latency_ms": 0}
+
+    await fe.reap(set())
+
+    assert fe._pending_verification == {}

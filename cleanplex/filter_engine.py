@@ -18,6 +18,12 @@ _seek_backoff_until: dict[str, float] = {}
 # the sessions list — otherwise a viewer who stops mid-mute is left silent.
 # {session_key: {"end_ms", "restore_to", "client_identifier", "client_address", "client_port"}}
 _muted_sessions: dict[str, dict] = {}
+# Seeks awaiting confirmation that playback actually moved: {session_key: {...}}
+_pending_verification: dict[str, dict] = {}
+
+# A client can land slightly short of the requested offset (keyframe snapping), so
+# verification allows this much shortfall before calling the seek a failure.
+_VERIFY_TOLERANCE_MS = 2000
 
 # Severity ranks follow the MovieContentFilter vocabulary. A segment is filtered
 # when the viewer's level for its category plus this rank exceeds 3 — the same
@@ -53,7 +59,7 @@ async def reap(active_session_keys: set[str], client: PlexClient | None = None) 
             except Exception as exc:
                 logger.warning("Failed to restore volume for ended session %s: %s", key, exc)
 
-    for state in (_recently_skipped, _seek_backoff_until, _muted_sessions):
+    for state in (_recently_skipped, _seek_backoff_until, _muted_sessions, _pending_verification):
         for key in [k for k in state if k not in active_session_keys]:
             del state[key]
 
@@ -92,6 +98,7 @@ async def process(
 
     pos = session.position_ms
 
+    await verify_pending_seek(session, client)
     await _restore_expired_mute(session, client, pos)
 
     # Don't re-trigger if we already handled this stretch recently
@@ -160,6 +167,45 @@ async def process(
         del _seek_backoff_until[session.session_key]
 
 
+async def verify_pending_seek(session: ActiveSession, client: PlexClient) -> None:
+    """Confirm the previous seek actually moved playback, and re-probe if not.
+
+    Some clients acknowledge a seek command and never move. Without this the
+    segment is recorded as skipped, `_recently_skipped` suppresses a retry, and
+    the viewer sees exactly the content the skip existed to remove.
+    """
+    pending = _pending_verification.pop(session.session_key, None)
+    if pending is None:
+        return
+
+    if session.position_ms >= pending["target_ms"] - _VERIFY_TOLERANCE_MS:
+        return
+
+    logger.warning(
+        "Seek on client %s reported success but position is still %dms (expected >= %dms)",
+        session.client_identifier, session.position_ms, pending["target_ms"],
+    )
+    # The learned transport accepted the command without acting on it, so stop
+    # trusting it and let the next attempt rediscover a working one.
+    await client._forget_profile(session.client_identifier)
+    _recently_skipped.pop(session.session_key, None)
+
+    await db.record_skip_event(
+        plex_guid=session.plex_guid,
+        title=session.full_title,
+        username=session.user,
+        client_identifier=session.client_identifier,
+        client_title=session.client_title,
+        category=pending["category"],
+        action="skip",
+        segment_id=pending.get("segment_id"),
+        position_ms=session.position_ms,
+        target_ms=pending["target_ms"],
+        success=False,
+        latency_ms=pending["latency_ms"],
+    )
+
+
 async def _apply_skip(session: ActiveSession, client: PlexClient, seg: dict, pos: int) -> None:
     """Seek past the segment and record the outcome."""
     target = seg["start_ms"]
@@ -174,18 +220,43 @@ async def _apply_skip(session: ActiveSession, client: PlexClient, seg: dict, pos
         seg.get("category", "nudity"),
         seg.get("confidence", 0.0),
     )
+    started = time.monotonic()
     success = await client.seek(
         session.client_identifier,
         target,
         session.client_address,
         session.client_port,
     )
+    latency_ms = int((time.monotonic() - started) * 1000)
+
     if success:
         # Track until the widened segment end to prevent re-triggering
         _recently_skipped[session.session_key] = seg["end_ms"]
         _seek_backoff_until.pop(session.session_key, None)
+        # Checked on the next tick: a 2xx response is not proof playback moved.
+        _pending_verification[session.session_key] = {
+            "target_ms": target,
+            "category": seg.get("category", ""),
+            "segment_id": seg.get("id"),
+            "latency_ms": latency_ms,
+        }
     else:
         _seek_backoff_until[session.session_key] = time.time() + 20
+
+    await db.record_skip_event(
+        plex_guid=session.plex_guid,
+        title=session.full_title,
+        username=session.user,
+        client_identifier=session.client_identifier,
+        client_title=session.client_title,
+        category=seg.get("category", ""),
+        action="skip",
+        segment_id=seg.get("id"),
+        position_ms=pos,
+        target_ms=target,
+        success=success,
+        latency_ms=latency_ms,
+    )
 
 
 async def _apply_mute(session: ActiveSession, client: PlexClient, seg: dict) -> None:
@@ -200,6 +271,7 @@ async def _apply_mute(session: ActiveSession, client: PlexClient, seg: dict) -> 
         seg["end_ms"],
         seg.get("category", "language"),
     )
+    started = time.monotonic()
     if await client.set_volume(
         session.client_identifier,
         0,
@@ -213,8 +285,25 @@ async def _apply_mute(session: ActiveSession, client: PlexClient, seg: dict) -> 
             "client_address": session.client_address,
             "client_port": session.client_port,
         }
+        muted_ok = True
     else:
         _seek_backoff_until[session.session_key] = time.time() + 20
+        muted_ok = False
+
+    await db.record_skip_event(
+        plex_guid=session.plex_guid,
+        title=session.full_title,
+        username=session.user,
+        client_identifier=session.client_identifier,
+        client_title=session.client_title,
+        category=seg.get("category", ""),
+        action="mute",
+        segment_id=seg.get("id"),
+        position_ms=session.position_ms,
+        target_ms=seg["end_ms"],
+        success=muted_ok,
+        latency_ms=int((time.monotonic() - started) * 1000),
+    )
 
 
 async def _restore_expired_mute(session: ActiveSession, client: PlexClient, pos: int) -> None:

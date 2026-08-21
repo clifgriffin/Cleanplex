@@ -33,6 +33,10 @@ async def _amain() -> None:
     # Mark any jobs left in running/queued state from a previous crashed process.
     await recover_stale_jobs()
 
+    pruned = await db.prune_skip_events(int(await db.get_setting("skip_event_retention_days", "90")))
+    if pruned:
+        logger.info("Pruned %d skip event(s) past the retention window", pruned)
+
     logger.info("Cleanplex starting — data dir: %s", DATA_DIR)
 
     if config.is_configured():

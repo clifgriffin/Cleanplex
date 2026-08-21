@@ -55,6 +55,25 @@ CREATE TABLE IF NOT EXISTS segments (
 );
 CREATE INDEX IF NOT EXISTS idx_segments_guid ON segments(plex_guid);
 
+CREATE TABLE IF NOT EXISTS skip_events (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    plex_guid         TEXT    NOT NULL,
+    title             TEXT    DEFAULT '',
+    username          TEXT    DEFAULT '',
+    client_identifier TEXT    DEFAULT '',
+    client_title      TEXT    DEFAULT '',
+    category          TEXT    DEFAULT '',
+    action            TEXT    DEFAULT 'skip',
+    segment_id        INTEGER,
+    position_ms       INTEGER DEFAULT 0,
+    target_ms         INTEGER DEFAULT 0,
+    success           INTEGER DEFAULT 1,
+    latency_ms        INTEGER DEFAULT 0,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_skip_events_created ON skip_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_skip_events_client ON skip_events(client_identifier);
+
 CREATE TABLE IF NOT EXISTS user_category_prefs (
     plex_username TEXT    NOT NULL,
     category      TEXT    NOT NULL,
@@ -202,6 +221,8 @@ DEFAULT_SETTINGS = {
     "sync_conflict_resolution": "consensus",
     "sync_verified_threshold": "2",
     "sync_timing_tolerance_ms": "2000",
+    # Days of skip history to keep; pruned at startup. 0 disables pruning.
+    "skip_event_retention_days": "90",
 }
 
 
@@ -341,6 +362,110 @@ async def update_settings(data: dict[str, str]) -> None:
 
 
 # ── User Filters ──────────────────────────────────────────────────────────────
+
+async def record_skip_event(
+    plex_guid: str,
+    title: str = "",
+    username: str = "",
+    client_identifier: str = "",
+    client_title: str = "",
+    category: str = "",
+    action: str = "skip",
+    segment_id: int | None = None,
+    position_ms: int = 0,
+    target_ms: int = 0,
+    success: bool = True,
+    latency_ms: int = 0,
+) -> int:
+    """Record one filter action and return its row id."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "INSERT INTO skip_events(plex_guid, title, username, client_identifier, client_title, "
+            "category, action, segment_id, position_ms, target_ms, success, latency_ms) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (plex_guid, title, username, client_identifier, client_title, category, action,
+             segment_id, position_ms, target_ms, int(success), latency_ms),
+        )
+        await conn.commit()
+        return cursor.lastrowid
+
+
+async def get_skip_events(limit: int = 50, offset: int = 0) -> list[dict]:
+    """Return recent skip events, newest first."""
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            "SELECT * FROM skip_events ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return [dict(r) for r in rows]
+
+
+async def count_skip_events() -> int:
+    async with get_connection() as conn:
+        row = await (await conn.execute("SELECT COUNT(*) FROM skip_events")).fetchone()
+        return row[0] if row else 0
+
+
+async def prune_skip_events(retention_days: int) -> int:
+    """Delete events older than the retention window. 0 keeps everything."""
+    if retention_days <= 0:
+        return 0
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "DELETE FROM skip_events WHERE created_at < datetime('now', ?)",
+            (f"-{int(retention_days)} days",),
+        )
+        await conn.commit()
+        return cursor.rowcount
+
+
+async def get_skip_counts_by_category() -> list[dict]:
+    """Return skip counts grouped by content category, busiest first."""
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            "SELECT COALESCE(NULLIF(category, ''), 'unknown') AS category, COUNT(*) AS count "
+            "FROM skip_events GROUP BY category ORDER BY count DESC"
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_skip_counts_by_client() -> list[dict]:
+    """Return per-client volume, failure rate and average latency, worst first.
+
+    Aggregated in SQL rather than by loading rows: this table grows without bound
+    between prunes.
+    """
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            """
+            SELECT COALESCE(NULLIF(client_title, ''), 'unknown') AS client_title,
+                   client_identifier,
+                   COUNT(*)                                   AS count,
+                   SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failures,
+                   ROUND(AVG(latency_ms))                     AS avg_latency_ms
+            FROM skip_events
+            GROUP BY client_identifier, client_title
+            ORDER BY failures DESC, count DESC
+            """
+        )
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["failure_rate"] = round(item["failures"] / item["count"], 3) if item["count"] else 0.0
+            result.append(item)
+        return result
+
+
+async def get_most_skipped_titles(limit: int = 20) -> list[dict]:
+    """Return the titles whose segments fire most often."""
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            "SELECT plex_guid, COALESCE(NULLIF(title, ''), plex_guid) AS title, COUNT(*) AS count "
+            "FROM skip_events GROUP BY plex_guid, title ORDER BY count DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(r) for r in rows]
+
 
 async def get_user_category_prefs(username: str) -> dict[str, dict]:
     """Return {category: {"level": int, "action": str}} for one user, empty if unset."""
