@@ -56,6 +56,7 @@ class SettingsPayload(BaseModel):
     excluded_library_ids: str | None = None
     scan_ratings: str | None = None
     scan_labels: str | None = None
+    profanity_wordlist: str | None = None
 
 
 class ValidateModelPathPayload(BaseModel):

@@ -104,6 +104,31 @@ async def import_pasted_list(payload: PastePayload):
     return await _store(payload.plex_guid, segments, "paste", payload.replace)
 
 
+class SubtitleScanPayload(BaseModel):
+    plex_guid: str
+    replace: bool = False
+
+
+@router.post("/scan-subtitles")
+async def scan_subtitles(payload: SubtitleScanPayload):
+    """Scan a title's subtitles for profanity and store mute segments."""
+    from ... import subtitle_scanner
+
+    job = await db.get_scan_job_by_guid(payload.plex_guid)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Unknown title: {payload.plex_guid}")
+    if not job.get("file_path"):
+        raise HTTPException(status_code=422, detail="This title has no file path on disk.")
+
+    if payload.replace:
+        await db.delete_segments_for_guid(payload.plex_guid)
+
+    count = await subtitle_scanner.scan_title(
+        payload.plex_guid, job.get("title") or "", job["file_path"]
+    )
+    return {"imported": count, "source": "subtitles", "title": job.get("title") or ""}
+
+
 @router.get("/export/{plex_guid}")
 async def export_segments(plex_guid: str, fmt: str = "edl"):
     """Export a title's segments as EDL or MCF for use in other players."""
