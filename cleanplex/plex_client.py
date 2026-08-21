@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,9 @@ class ActiveSession:
     client_address: str = ""
     client_port: int = 32500
     library_section_id: str = ""
+    # Player volume 0-100, or None when the client does not report one. Captured so
+    # a mute can restore the viewer's own level rather than guessing 100.
+    volume: int | None = None
 
 
 @dataclass
@@ -84,6 +88,10 @@ class PlexClient:
         self._http = httpx.AsyncClient(timeout=10)
         # {rating_key: (monotonic_timestamp, (show_guid, show_title, show_thumb, show_rating_key, season_rating_key))}
         self._show_art_cache: dict[str, tuple[float, tuple[str, str, str, str, str]]] = {}
+        # {client_identifier: {"transport": "proxy"|"direct", "port": int, "variant": int}}
+        # How each client last accepted a player command. Populated by
+        # load_client_profiles() at startup and updated whenever one is learned.
+        self._client_profiles: dict[str, dict] = {}
 
     def _get_server(self) -> PlexServer:
         if self._server is None:
@@ -142,6 +150,12 @@ class PlexClient:
                 except Exception:
                     client_port = 32500
 
+                volume_raw = getattr(player, "volume", None) if player else None
+                try:
+                    volume = int(volume_raw) if volume_raw is not None else None
+                except Exception:
+                    volume = None
+
                 # Resolve file path
                 file_path = ""
                 if s.media and s.media[0].parts:
@@ -174,6 +188,7 @@ class PlexClient:
                         client_port=client_port,
                         thumb=s.thumb or "",
                         library_section_id=section_id,
+                        volume=volume,
                     )
                 )
             except Exception as exc:
@@ -181,109 +196,177 @@ class PlexClient:
 
         return result
 
-    # ── Seek ──────────────────────────────────────────────────────────────────
+    # ── Player commands ───────────────────────────────────────────────────────
 
-    async def seek(self, client_identifier: str, offset_ms: int, client_address: str = "", client_port: int = 32500) -> bool:
-        """Seek via server proxy first, then try direct client control as fallback."""
+    async def load_client_profiles(self) -> None:
+        """Restore learned per-client transports so a restart does not re-probe."""
+        from . import database as db
+
+        try:
+            raw = await db.get_setting("client_seek_profiles", "{}")
+            loaded = json.loads(raw or "{}")
+            if isinstance(loaded, dict):
+                self._client_profiles = {k: v for k, v in loaded.items() if isinstance(v, dict)}
+        except Exception as exc:
+            logger.debug("Could not load client seek profiles: %s", exc)
+
+    async def _persist_profiles(self) -> None:
+        """Write profiles back to settings.
+
+        Awaited rather than fired off as a task: a detached write can outlive the
+        loop it was created on. Profiles change rarely — only when a client's
+        working transport changes — so the cost sits outside the hot path.
+        """
+        from . import database as db
+
+        try:
+            await db.set_setting("client_seek_profiles", json.dumps(self._client_profiles))
+        except Exception as exc:
+            # Persistence is best-effort; the in-memory cache still serves this run.
+            logger.debug("Could not persist client seek profiles: %s", exc)
+
+    async def _remember_profile(self, client_identifier: str, profile: dict) -> None:
+        if self._client_profiles.get(client_identifier) == profile:
+            return
+        self._client_profiles[client_identifier] = profile
+        await self._persist_profiles()
+
+    async def _forget_profile(self, client_identifier: str) -> None:
+        if self._client_profiles.pop(client_identifier, None) is not None:
+            await self._persist_profiles()
+
+    # Direct-control fallbacks, ordered cheapest-first. A client that needs one of
+    # the later variants needs it every time, so the winning combination is cached
+    # per client rather than rediscovered on each command — see _send_command.
+    _FALLBACK_PORTS = (32500, 3005)
+
+    def _direct_variants(self, base: str, client_identifier: str) -> list[tuple[str, dict]]:
+        """Return (url, headers) pairs to try when the server proxy will not relay."""
+        full_headers = {
+            "X-Plex-Target-Client-Identifier": client_identifier,
+            "X-Plex-Client-Identifier": "cleanplex-server",
+            "X-Plex-Product": "Cleanplex",
+            "X-Plex-Device-Name": "Cleanplex",
+            "X-Plex-Platform": "Windows",
+        }
+        return [
+            (f"{base}&X-Plex-Token={self.token}", {"X-Plex-Target-Client-Identifier": client_identifier}),
+            (base, {"X-Plex-Token": self.token, "X-Plex-Target-Client-Identifier": client_identifier}),
+            (f"{base}&X-Plex-Token={self.token}", full_headers),
+            (base, {"X-Plex-Token": self.token, **full_headers}),
+        ]
+
+    async def _try_proxy(self, path: str, client_identifier: str) -> bool:
+        """Relay a player command through the server. Works for most modern clients."""
         try:
             srv = await asyncio.to_thread(self._get_server)
-            key = (
-                f"/player/playback/seekTo"
-                f"?offset={offset_ms}"
-                f"&type=video"
-                f"&commandID={int(time.time())}"
-            )
             headers = {"X-Plex-Target-Client-Identifier": client_identifier}
-            await asyncio.to_thread(srv.query, key, headers=headers)
-            logger.info("Seeked client %s to %dms via server query proxy", client_identifier, offset_ms)
+            await asyncio.to_thread(srv.query, path, headers=headers)
             return True
         except Exception as exc:
-            logger.warning("Proxy seek failed for %s: %s", client_identifier, exc)
-
-        if not client_address:
-            logger.warning("No client_address available for direct seek fallback (client=%s)", client_identifier)
+            logger.warning("Proxy %s failed for %s: %s", path.split("?")[0], client_identifier, exc)
             return False
 
-        ports = [client_port, 32500, 3005]
-        seen: set[int] = set()
-        for port in ports:
-            if port in seen:
-                continue
-            seen.add(port)
-            base = (
-                f"http://{client_address}:{port}/player/playback/seekTo"
-                f"?offset={offset_ms}"
-                f"&type=video"
-                f"&commandID={int(time.time())}"
+    async def _try_direct(
+        self, path: str, client_identifier: str, address: str, port: int, variant: int
+    ) -> bool:
+        """Send one specific direct-control attempt. Returns True on a 2xx response."""
+        base = f"http://{address}:{port}{path}"
+        variants = self._direct_variants(base, client_identifier)
+        if variant >= len(variants):
+            return False
+        url, headers = variants[variant]
+        try:
+            resp = await self._http.get(url, headers=headers)
+            if resp.status_code < 300:
+                return True
+            logger.warning(
+                "Direct command HTTP %d for client %s at %s:%d (variant=%d, body=%s)",
+                resp.status_code, client_identifier, address, port, variant + 1, resp.text[:500],
             )
-            variants = [
-                (
-                    f"{base}&X-Plex-Token={self.token}",
-                    {"X-Plex-Target-Client-Identifier": client_identifier},
-                ),
-                (
-                    base,
-                    {
-                        "X-Plex-Token": self.token,
-                        "X-Plex-Target-Client-Identifier": client_identifier,
-                    },
-                ),
-                (
-                    f"{base}&X-Plex-Token={self.token}",
-                    {
-                        "X-Plex-Target-Client-Identifier": client_identifier,
-                        "X-Plex-Client-Identifier": "cleanplex-server",
-                        "X-Plex-Product": "Cleanplex",
-                        "X-Plex-Device-Name": "Cleanplex",
-                        "X-Plex-Platform": "Windows",
-                    },
-                ),
-                (
-                    base,
-                    {
-                        "X-Plex-Token": self.token,
-                        "X-Plex-Target-Client-Identifier": client_identifier,
-                        "X-Plex-Client-Identifier": "cleanplex-server",
-                        "X-Plex-Product": "Cleanplex",
-                        "X-Plex-Device-Name": "Cleanplex",
-                        "X-Plex-Platform": "Windows",
-                    },
-                ),
-            ]
+        except Exception as exc:
+            logger.warning(
+                "Direct command failed for client %s at %s:%d (variant=%d): %s",
+                client_identifier, address, port, variant + 1, exc,
+            )
+        return False
 
-            for idx, (url, headers) in enumerate(variants, start=1):
-                try:
-                    resp = await self._http.get(url, headers=headers)
-                    if resp.status_code < 300:
-                        logger.info(
-                            "Seeked client %s directly at %s:%d to %dms (variant=%d)",
-                            client_identifier,
-                            client_address,
-                            port,
-                            offset_ms,
-                            idx,
-                        )
-                        return True
-                    logger.warning(
-                        "Direct seek HTTP %d for client %s at %s:%d (variant=%d, body=%s)",
-                        resp.status_code,
-                        client_identifier,
-                        client_address,
-                        port,
-                        idx,
-                        resp.text[:500],
+    async def _send_command(
+        self, path: str, client_identifier: str, client_address: str = "", client_port: int = 32500
+    ) -> bool:
+        """Send a player command, preferring the transport that last worked for this client.
+
+        Without the cache every command on a proxy-averse client re-runs the full
+        search — up to 12 requests — before landing, which is exactly when latency
+        matters most.
+        """
+        profile = self._client_profiles.get(client_identifier)
+
+        if profile is not None:
+            if profile.get("transport") == "proxy":
+                if await self._try_proxy(path, client_identifier):
+                    return True
+            elif client_address:
+                if await self._try_direct(
+                    path, client_identifier, client_address,
+                    int(profile.get("port", client_port)), int(profile.get("variant", 0)),
+                ):
+                    return True
+            # The learned path stopped working (client restarted, port changed):
+            # fall through to a full search and re-learn.
+            logger.info("Cached transport failed for %s — re-probing", client_identifier)
+            await self._forget_profile(client_identifier)
+
+        if await self._try_proxy(path, client_identifier):
+            await self._remember_profile(client_identifier, {"transport": "proxy"})
+            return True
+
+        if not client_address:
+            logger.warning("No client_address available for direct fallback (client=%s)", client_identifier)
+            return False
+
+        ports: list[int] = []
+        for port in (client_port, *self._FALLBACK_PORTS):
+            if port and port not in ports:
+                ports.append(port)
+
+        for port in ports:
+            for variant in range(len(self._direct_variants("http://x", client_identifier))):
+                if await self._try_direct(path, client_identifier, client_address, port, variant):
+                    logger.info(
+                        "Client %s reachable directly at %s:%d (variant=%d)",
+                        client_identifier, client_address, port, variant + 1,
                     )
-                except Exception as exc:
-                    logger.warning(
-                        "Direct seek failed for client %s at %s:%d (variant=%d): %s",
+                    await self._remember_profile(
                         client_identifier,
-                        client_address,
-                        port,
-                        idx,
-                        exc,
+                        {"transport": "direct", "port": port, "variant": variant},
                     )
+                    return True
 
         return False
+
+    async def seek(self, client_identifier: str, offset_ms: int, client_address: str = "", client_port: int = 32500) -> bool:
+        """Seek the given client to offset_ms. Returns True if a command was accepted."""
+        path = (
+            f"/player/playback/seekTo?offset={offset_ms}&type=video"
+            f"&commandID={int(time.time())}"
+        )
+        success = await self._send_command(path, client_identifier, client_address, client_port)
+        if success:
+            logger.info("Seeked client %s to %dms", client_identifier, offset_ms)
+        return success
+
+    async def set_volume(self, client_identifier: str, level: int, client_address: str = "", client_port: int = 32500) -> bool:
+        """Set the client's playback volume (0-100). Used to mute rather than skip."""
+        level = max(0, min(100, int(level)))
+        path = (
+            f"/player/playback/setParameters?volume={level}&type=video"
+            f"&commandID={int(time.time())}"
+        )
+        success = await self._send_command(path, client_identifier, client_address, client_port)
+        if success:
+            logger.info("Set volume on client %s to %d", client_identifier, level)
+        return success
 
     # ── Library ───────────────────────────────────────────────────────────────
 
@@ -308,25 +391,26 @@ class PlexClient:
         try:
             srv = await asyncio.to_thread(self._get_server)
             section = await asyncio.to_thread(srv.library.sectionByID, int(section_id))
-            all_items = await asyncio.to_thread(section.all)
         except Exception as exc:
-            logger.warning("Failed to fetch library items for section %s: %s", section_id, exc)
+            logger.warning("Failed to fetch library section %s: %s", section_id, exc)
+            return []
+
+        try:
+            if section.type == "show":
+                # One bulk call for all episodes — avoids N per-show API calls.
+                raw_items = await asyncio.to_thread(lambda: section.search(libtype="episode"))
+            else:
+                raw_items = await asyncio.to_thread(section.all)
+        except Exception as exc:
+            logger.warning("Failed to fetch items for section %s: %s", section_id, exc)
             return []
 
         result = []
-        for item in all_items:
+        for item in raw_items:
             try:
-                if item.type == "show":
-                    # Enumerate all episodes
-                    episodes = await asyncio.to_thread(item.episodes)
-                    for ep in episodes:
-                        media_item = self._media_item_from_plex(ep, section_id, section.title)
-                        if media_item:
-                            result.append(media_item)
-                else:
-                    media_item = self._media_item_from_plex(item, section_id, section.title)
-                    if media_item:
-                        result.append(media_item)
+                media_item = self._media_item_from_plex(item, section_id, section.title)
+                if media_item:
+                    result.append(media_item)
             except Exception as exc:
                 logger.debug("Error parsing library item: %s", exc)
 
@@ -503,6 +587,69 @@ class PlexClient:
         except Exception as exc:
             logger.warning("Failed to update Plex summary metadata for rating_key=%s: %s", rating_key, exc)
             return False
+
+    async def get_markers(self, rating_key: str) -> list[dict]:
+        """Return intro/credits markers for a Plex item as a list of dicts.
+
+        Each dict contains: plex_marker_id, marker_type, start_ms, end_ms, final.
+        Returns empty list if the item has no markers or markers attribute is absent.
+        """
+        try:
+            srv = await asyncio.to_thread(self._get_server)
+            item = await asyncio.to_thread(srv.fetchItem, int(rating_key))
+            raw_markers = await asyncio.to_thread(lambda: getattr(item, "markers", []))
+            result = []
+            for m in raw_markers:
+                result.append({
+                    "plex_marker_id": getattr(m, "id", None),
+                    "marker_type": getattr(m, "type", "unknown"),
+                    "start_ms": int(getattr(m, "start", 0)),
+                    "end_ms": int(getattr(m, "end", 0)),
+                    "final": bool(getattr(m, "final", False)),
+                })
+            return result
+        except Exception as exc:
+            logger.error("get_markers failed for rating_key=%s: %s", rating_key, exc)
+            raise
+
+    async def update_marker(self, rating_key: str, plex_marker_id: int, start_ms: int, end_ms: int) -> None:
+        """Write updated marker timestamps back to the Plex server.
+
+        Raises PermissionError if Plex rejects due to Plex Pass restriction.
+        Raises RuntimeError for other Plex API failures.
+        """
+        try:
+            srv = await asyncio.to_thread(self._get_server)
+            item = await asyncio.to_thread(srv.fetchItem, int(rating_key))
+            raw_markers = await asyncio.to_thread(lambda: getattr(item, "markers", []))
+            target = next((m for m in raw_markers if getattr(m, "id", None) == plex_marker_id), None)
+            if target is None:
+                raise RuntimeError(f"Marker {plex_marker_id} not found on rating_key={rating_key}")
+            await asyncio.to_thread(target.edit, startTimeOffset=start_ms, endTimeOffset=end_ms)
+            logger.info("Updated Plex marker %s on rating_key=%s: %d–%d ms", plex_marker_id, rating_key, start_ms, end_ms)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "unauthorized" in msg or "403" in msg or "plex pass" in msg or "subscription" in msg:
+                raise PermissionError(f"Plex Pass required to edit markers: {exc}") from exc
+            raise RuntimeError(f"Plex marker update failed: {exc}") from exc
+
+    async def create_marker(self, rating_key: str, marker_type: str, start_ms: int, end_ms: int) -> None:
+        """Create a new intro/credits marker on a Plex item via the undocumented markers API.
+
+        Requires Plex Pass. Raises PermissionError if subscription check fails.
+        """
+        params = {
+            "type": marker_type,
+            "startTimeOffset": start_ms,
+            "endTimeOffset": end_ms,
+            "X-Plex-Token": self.token,
+        }
+        resp = await self._http.post(f"{self.url}/library/metadata/{rating_key}/markers", params=params)
+        if resp.status_code in (401, 403):
+            raise PermissionError(f"Plex Pass required to create markers (HTTP {resp.status_code})")
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Plex marker create failed: HTTP {resp.status_code} — {resp.text[:200]}")
+        logger.info("Created Plex marker type=%s on rating_key=%s: %d–%d ms", marker_type, rating_key, start_ms, end_ms)
 
     async def close(self) -> None:
         await self._http.aclose()

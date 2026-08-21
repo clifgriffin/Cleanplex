@@ -16,6 +16,8 @@ class Config:
     poll_interval: int = 5
     confidence_threshold: float = 0.6
     skip_buffer_ms: int = 3000
+    pre_buffer_ms: int = 3000
+    post_buffer_ms: int = 3000
     scan_step_ms: int = 5000
     scan_workers: int = 2
     nudenet_model: str = "320n"
@@ -58,6 +60,10 @@ class Config:
             poll_interval=int(s.get("poll_interval", "5")),
             confidence_threshold=float(s.get("confidence_threshold", "0.6")),
             skip_buffer_ms=int(s.get("skip_buffer_ms", "3000")),
+            # Fall back to skip_buffer_ms so a settings row written before the split
+            # still governs both edges rather than silently reverting to the default.
+            pre_buffer_ms=int(s.get("pre_buffer_ms") or s.get("skip_buffer_ms", "3000")),
+            post_buffer_ms=int(s.get("post_buffer_ms") or s.get("skip_buffer_ms", "3000")),
             scan_step_ms=int(s.get("scan_step_ms", "5000")),
             scan_workers=max(1, int(s.get("scan_workers", "2"))),
             nudenet_model=s.get("nudenet_model", "320n"),

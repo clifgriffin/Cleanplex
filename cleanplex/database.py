@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
@@ -15,6 +16,8 @@ from .logger import get_logger
 logger = get_logger(__name__)
 
 _DB_PATH: Path | None = None
+# Serializes concurrent upsert_plex_markers calls so DELETE+INSERT never interleave.
+_marker_upsert_lock = asyncio.Lock()
 
 
 def set_db_path(path: Path) -> None:
@@ -51,6 +54,14 @@ CREATE TABLE IF NOT EXISTS segments (
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_segments_guid ON segments(plex_guid);
+
+CREATE TABLE IF NOT EXISTS user_category_prefs (
+    plex_username TEXT    NOT NULL,
+    category      TEXT    NOT NULL,
+    level         INTEGER DEFAULT 0,
+    action        TEXT    DEFAULT '',
+    PRIMARY KEY (plex_username, category)
+);
 
 CREATE TABLE IF NOT EXISTS user_filters (
     plex_username TEXT PRIMARY KEY,
@@ -125,6 +136,38 @@ CREATE TABLE IF NOT EXISTS bg_jobs (
     completed_at       TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_bg_jobs_status ON bg_jobs(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS plex_markers (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    plex_guid      TEXT    NOT NULL,
+    rating_key     TEXT    NOT NULL,
+    marker_type    TEXT    NOT NULL,
+    start_ms       INTEGER NOT NULL,
+    end_ms         INTEGER NOT NULL,
+    plex_marker_id INTEGER,
+    final          INTEGER DEFAULT 0,
+    synced_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(rating_key, plex_marker_id)
+);
+CREATE INDEX IF NOT EXISTS idx_plex_markers_guid ON plex_markers(plex_guid);
+CREATE INDEX IF NOT EXISTS idx_plex_markers_rating_key ON plex_markers(rating_key);
+
+CREATE TABLE IF NOT EXISTS plex_title_cache (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_id      TEXT    NOT NULL,
+    rating_key      TEXT    NOT NULL,
+    plex_guid       TEXT    NOT NULL,
+    title           TEXT    NOT NULL,
+    media_type      TEXT    NOT NULL,
+    show_guid       TEXT    DEFAULT '',
+    show_title      TEXT    DEFAULT '',
+    show_rating_key TEXT    DEFAULT '',
+    content_rating  TEXT    DEFAULT '',
+    year            INTEGER,
+    cached_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(library_id, rating_key)
+);
+CREATE INDEX IF NOT EXISTS idx_plex_title_cache_library ON plex_title_cache(library_id);
 """
 
 DEFAULT_SETTINGS = {
@@ -133,6 +176,11 @@ DEFAULT_SETTINGS = {
     "poll_interval": "5",
     "confidence_threshold": "0.6",
     "skip_buffer_ms": "3000",
+    # Segment bounds are widened by these before matching, so a skip lands ahead of
+    # the flagged content and does not re-trigger on the tail. Seeded from
+    # skip_buffer_ms at migration time for installs that predate them.
+    "pre_buffer_ms": "3000",
+    "post_buffer_ms": "3000",
     "scan_step_ms": "5000",
     "scan_workers": "2",
     "segment_gap_ms": "12000",
@@ -182,6 +230,15 @@ async def init_db() -> None:
             # part_files stores a JSON array of all file paths for multi-part movies
             # (e.g. CD1/CD2 rips). Empty string means single-file title.
             "ALTER TABLE scan_jobs ADD COLUMN part_files TEXT DEFAULT ''",
+            # Content classification, following the MovieContentFilter 1.1.0
+            # vocabulary. Defaults describe what the NudeNet scanner produces, so
+            # rows written before this migration read back correctly.
+            "ALTER TABLE segments ADD COLUMN category TEXT DEFAULT 'nudity'",
+            "ALTER TABLE segments ADD COLUMN severity TEXT DEFAULT 'high'",
+            "ALTER TABLE segments ADD COLUMN action TEXT DEFAULT 'skip'",
+            "ALTER TABLE segments ADD COLUMN channel TEXT DEFAULT 'both'",
+            "ALTER TABLE segments ADD COLUMN source TEXT DEFAULT 'scanner'",
+            "CREATE INDEX IF NOT EXISTS idx_segments_guid_category ON segments(plex_guid, category)",
         ]
         for stmt in migrations:
             try:
@@ -192,6 +249,50 @@ async def init_db() -> None:
                     # Unexpected error — surface it rather than silently continuing.
                     logger.error("Unexpected migration failure: %s — %s", stmt, exc)
                     raise
+        # Migrate plex_markers: replace UNIQUE(plex_guid, plex_marker_id) with
+        # UNIQUE(rating_key, plex_marker_id). Episodes from the same show share the
+        # same IMDB plex_guid, so the old constraint caused false collisions during
+        # concurrent bulk sync. plex_markers is a Plex cache — safe to recreate.
+        schema_row = await (await conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='plex_markers'"
+        )).fetchone()
+        if schema_row and "plex_guid, plex_marker_id" in (schema_row["sql"] or ""):
+            await conn.executescript("""
+                CREATE TABLE IF NOT EXISTS plex_markers_v2 (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    plex_guid      TEXT    NOT NULL,
+                    rating_key     TEXT    NOT NULL,
+                    marker_type    TEXT    NOT NULL,
+                    start_ms       INTEGER NOT NULL,
+                    end_ms         INTEGER NOT NULL,
+                    plex_marker_id INTEGER,
+                    final          INTEGER DEFAULT 0,
+                    synced_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(rating_key, plex_marker_id)
+                );
+                INSERT OR IGNORE INTO plex_markers_v2
+                    SELECT * FROM plex_markers;
+                DROP TABLE plex_markers;
+                ALTER TABLE plex_markers_v2 RENAME TO plex_markers;
+                CREATE INDEX IF NOT EXISTS idx_plex_markers_guid ON plex_markers(plex_guid);
+                CREATE INDEX IF NOT EXISTS idx_plex_markers_rating_key ON plex_markers(rating_key);
+            """)
+            await conn.commit()
+            logger.info("Migrated plex_markers: UNIQUE constraint now on (rating_key, plex_marker_id)")
+
+        # Seed the split buffers from the existing skip_buffer_ms before the
+        # defaults below claim the keys, so an install that tuned skip_buffer_ms
+        # keeps its value instead of silently reverting to 3000.
+        legacy_buffer = await (await conn.execute(
+            "SELECT value FROM settings WHERE key = 'skip_buffer_ms'"
+        )).fetchone()
+        if legacy_buffer and legacy_buffer["value"]:
+            for key in ("pre_buffer_ms", "post_buffer_ms"):
+                await conn.execute(
+                    "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
+                    (key, legacy_buffer["value"]),
+                )
+
         for key, value in DEFAULT_SETTINGS.items():
             await conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
@@ -235,6 +336,37 @@ async def update_settings(data: dict[str, str]) -> None:
 
 
 # ── User Filters ──────────────────────────────────────────────────────────────
+
+async def get_user_category_prefs(username: str) -> dict[str, dict]:
+    """Return {category: {"level": int, "action": str}} for one user, empty if unset."""
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            "SELECT category, level, action FROM user_category_prefs WHERE plex_username=?",
+            (username,),
+        )
+        return {r["category"]: {"level": r["level"], "action": r["action"]} for r in rows}
+
+
+async def upsert_user_category_pref(username: str, category: str, level: int, action: str = "") -> None:
+    """Set one user's filtering level (0-3) and optional action override for a category."""
+    async with get_connection() as conn:
+        await conn.execute(
+            "INSERT INTO user_category_prefs(plex_username, category, level, action) VALUES(?,?,?,?) "
+            "ON CONFLICT(plex_username, category) DO UPDATE SET level=excluded.level, action=excluded.action",
+            (username, category, level, action),
+        )
+        await conn.commit()
+
+
+async def delete_user_category_prefs(username: str) -> int:
+    """Remove all category preferences for a user, reverting them to defaults."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "DELETE FROM user_category_prefs WHERE plex_username=?", (username,)
+        )
+        await conn.commit()
+        return cursor.rowcount
+
 
 async def get_all_user_filters() -> list[dict]:
     async with get_connection() as conn:
@@ -349,15 +481,61 @@ async def insert_segment(
     confidence: float = 0.0,
     thumbnail_path: str | None = None,
     labels: str = "",
+    category: str = "nudity",
+    severity: str = "high",
+    action: str = "skip",
+    channel: str = "both",
+    source: str = "scanner",
 ) -> int:
+    """Insert one segment and return its row id.
+
+    Classification defaults describe scanner output so existing callers keep
+    their behaviour; importers pass the values parsed from the source file.
+    """
     async with get_connection() as conn:
         cursor = await conn.execute(
-            "INSERT INTO segments(plex_guid, title, start_ms, end_ms, confidence, thumbnail_path, labels) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (plex_guid, title, start_ms, end_ms, confidence, thumbnail_path, labels),
+            "INSERT INTO segments(plex_guid, title, start_ms, end_ms, confidence, thumbnail_path, "
+            "labels, category, severity, action, channel, source) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (plex_guid, title, start_ms, end_ms, confidence, thumbnail_path, labels,
+             category, severity, action, channel, source),
         )
         await conn.commit()
         return cursor.lastrowid
+
+
+async def insert_segments_bulk(plex_guid: str, title: str, segments: list[dict], source: str) -> int:
+    """Insert many parsed segments in one transaction and return the row count.
+
+    Used by the importers, where a single file routinely carries 100+ cues —
+    one INSERT per cue would be a needless round trip each.
+    """
+    if not segments:
+        return 0
+    async with get_connection() as conn:
+        await conn.executemany(
+            "INSERT INTO segments(plex_guid, title, start_ms, end_ms, confidence, "
+            "labels, category, severity, action, channel, source) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    plex_guid,
+                    title,
+                    seg["start_ms"],
+                    seg["end_ms"],
+                    seg.get("confidence", 1.0),
+                    seg.get("labels", ""),
+                    seg.get("category", "other"),
+                    seg.get("severity", "high"),
+                    seg.get("action", "skip"),
+                    seg.get("channel", "both"),
+                    source,
+                )
+                for seg in segments
+            ],
+        )
+        await conn.commit()
+        return len(segments)
 
 
 async def delete_segment(segment_id: int) -> bool:
@@ -888,4 +1066,186 @@ async def get_local_library_for_sync() -> list[dict]:
         item["segments_count"] = len(item["segments"])
         result.append(item)
     return result
+
+
+# ── Plex Markers ───────────────────────────────────────────────────────────────
+
+async def upsert_plex_markers(plex_guid: str, rating_key: str, markers: list[dict]) -> None:
+    """Replace all stored markers for a title with the current Plex state.
+
+    Delete-then-insert keyed on rating_key. The module-level lock ensures concurrent
+    Sync All calls never interleave their DELETE+INSERT pairs in the same connection.
+    """
+    async with _marker_upsert_lock:
+        async with get_connection() as conn:
+            await conn.execute("DELETE FROM plex_markers WHERE rating_key=?", (rating_key,))
+            for m in markers:
+                await conn.execute(
+                    """
+                    INSERT INTO plex_markers(plex_guid, rating_key, marker_type, start_ms, end_ms, plex_marker_id, final, synced_at)
+                    VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                    """,
+                    (plex_guid, rating_key, m["marker_type"], m["start_ms"], m["end_ms"], m["plex_marker_id"], 1 if m.get("final") else 0),
+                )
+            await conn.commit()
+
+
+async def get_plex_markers_for_guid(plex_guid: str) -> list[dict]:
+    """Return all markers for a title ordered by start_ms."""
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            "SELECT * FROM plex_markers WHERE plex_guid=? ORDER BY start_ms", (plex_guid,)
+        )
+        return [dict(r) for r in rows]
+
+
+async def get_plex_marker(marker_id: int) -> dict | None:
+    """Return a single marker row including rating_key and plex_marker_id needed for Plex write-back."""
+    async with get_connection() as conn:
+        row = await (await conn.execute("SELECT * FROM plex_markers WHERE id=?", (marker_id,))).fetchone()
+        return dict(row) if row else None
+
+
+async def update_plex_marker_timestamps(marker_id: int, start_ms: int, end_ms: int) -> bool:
+    """Update start_ms and end_ms for a stored marker. Returns True if a row was updated."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "UPDATE plex_markers SET start_ms=?, end_ms=? WHERE id=?",
+            (start_ms, end_ms, marker_id),
+        )
+        await conn.commit()
+        return cursor.rowcount > 0
+
+
+async def delete_plex_marker(marker_id: int) -> bool:
+    """Delete a single marker row. Returns True if a row was deleted."""
+    async with get_connection() as conn:
+        cursor = await conn.execute("DELETE FROM plex_markers WHERE id=?", (marker_id,))
+        await conn.commit()
+        return cursor.rowcount > 0
+
+
+async def get_plex_marker_counts_for_library(library_id: str) -> dict[str, int]:
+    """Return {plex_guid: marker_count} for all titles in a library (single query)."""
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            """
+            SELECT m.plex_guid, COUNT(*) as cnt
+            FROM plex_markers m
+            JOIN scan_jobs j ON j.plex_guid = m.plex_guid
+            WHERE j.library_id = ?
+            GROUP BY m.plex_guid
+            """,
+            (library_id,),
+        )
+        return {row["plex_guid"]: row["cnt"] for row in rows}
+
+
+async def get_plex_marker_counts_for_guids(guids: list[str]) -> dict[str, int]:
+    """Return {plex_guid: marker_count} for an arbitrary list of guids (single query)."""
+    if not guids:
+        return {}
+    placeholders = ",".join("?" * len(guids))
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            f"SELECT plex_guid, COUNT(*) as cnt FROM plex_markers WHERE plex_guid IN ({placeholders}) GROUP BY plex_guid",
+            guids,
+        )
+        return {row["plex_guid"]: row["cnt"] for row in rows}
+
+
+async def get_plex_marker_counts_for_rating_keys(rating_keys: list[str]) -> dict[str, int]:
+    """Return {rating_key: marker_count} for an arbitrary list of rating keys (single query)."""
+    if not rating_keys:
+        return {}
+    placeholders = ",".join("?" * len(rating_keys))
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            f"SELECT rating_key, COUNT(*) as cnt FROM plex_markers WHERE rating_key IN ({placeholders}) GROUP BY rating_key",
+            rating_keys,
+        )
+        return {row["rating_key"]: row["cnt"] for row in rows}
+
+
+async def insert_plex_marker(plex_guid: str, rating_key: str, marker_type: str, start_ms: int, end_ms: int) -> dict:
+    """Insert a new manually-created marker (no Plex write). Returns the new row."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            """
+            INSERT INTO plex_markers(plex_guid, rating_key, marker_type, start_ms, end_ms, plex_marker_id, final, synced_at)
+            VALUES(?,?,?,?,?,NULL,0,CURRENT_TIMESTAMP)
+            """,
+            (plex_guid, rating_key, marker_type, start_ms, end_ms),
+        )
+        await conn.commit()
+        row = await (await conn.execute("SELECT * FROM plex_markers WHERE id=?", (cursor.lastrowid,))).fetchone()
+        return dict(row)
+
+
+async def get_plex_markers_for_rating_key(rating_key: str) -> list[dict]:
+    """Return all markers for a Plex item by rating_key, ordered by start_ms."""
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            "SELECT * FROM plex_markers WHERE rating_key=? ORDER BY start_ms", (rating_key,)
+        )
+        return [dict(r) for r in rows]
+
+
+# ── Plex title cache ───────────────────────────────────────────────────────────
+
+async def get_plex_title_cache(library_id: str) -> list[dict]:
+    """Return cached title list for a library, joined with current marker counts."""
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            """
+            SELECT c.*, COALESCE(m.cnt, 0) AS marker_count
+            FROM plex_title_cache c
+            LEFT JOIN (
+                SELECT rating_key, COUNT(*) AS cnt
+                FROM plex_markers
+                GROUP BY rating_key
+            ) m ON m.rating_key = c.rating_key
+            WHERE c.library_id = ?
+            ORDER BY c.title
+            """,
+            (library_id,),
+        )
+        return [dict(r) for r in rows]
+
+
+async def upsert_plex_title_cache(library_id: str, items: list[dict]) -> None:
+    """Replace the title cache for a library with a fresh Plex snapshot."""
+    async with get_connection() as conn:
+        await conn.execute("DELETE FROM plex_title_cache WHERE library_id=?", (library_id,))
+        for item in items:
+            await conn.execute(
+                """
+                INSERT INTO plex_title_cache
+                    (library_id, rating_key, plex_guid, title, media_type,
+                     show_guid, show_title, show_rating_key, content_rating, year)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    library_id,
+                    item["rating_key"],
+                    item["plex_guid"],
+                    item["title"],
+                    item["media_type"],
+                    item.get("show_guid", ""),
+                    item.get("show_title", ""),
+                    item.get("show_rating_key", ""),
+                    item.get("content_rating", ""),
+                    item.get("year"),
+                ),
+            )
+        await conn.commit()
+
+
+async def plex_title_cache_exists(library_id: str) -> bool:
+    """Return True if the cache has any rows for this library."""
+    async with get_connection() as conn:
+        row = await (await conn.execute(
+            "SELECT 1 FROM plex_title_cache WHERE library_id=? LIMIT 1", (library_id,)
+        )).fetchone()
+        return row is not None
 

@@ -31,11 +31,22 @@ async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
             client = get_client_fn()
             sessions = await client.get_active_sessions()
 
+            # Drop tracking state for sessions that ended, restoring volume for any
+            # that stopped mid-mute. Plex reuses session keys, so stale entries
+            # would otherwise suppress skips for unrelated playback.
+            await filter_engine.reap({s.session_key for s in sessions}, client)
+
             for session in sessions:
                 user_filter = await db.get_user_filter(session.user)
                 # Default: filter enabled if no explicit record
                 if user_filter is None or user_filter["enabled"]:
-                    await filter_engine.process(session, client, config.skip_buffer_ms, config.poll_interval * 1000)
+                    await filter_engine.process(
+                        session,
+                        client,
+                        config.pre_buffer_ms,
+                        config.post_buffer_ms,
+                        config.poll_interval * 1000,
+                    )
 
                     # Log skip event if a skip just happened (detect by checking _recently_skipped)
                     sk = filter_engine._recently_skipped.get(session.session_key, 0)

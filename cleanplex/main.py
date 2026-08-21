@@ -36,7 +36,10 @@ async def _amain() -> None:
     logger.info("Cleanplex starting — data dir: %s", DATA_DIR)
 
     if config.is_configured():
-        plex_mod.init_client(config.plex_url, config.plex_token)
+        client = plex_mod.init_client(config.plex_url, config.plex_token)
+        # Restore the transport each client last accepted, so the first skip after a
+        # restart doesn't pay the full probe cost again.
+        await client.load_client_profiles()
         logger.info("Plex client initialised: %s", config.plex_url)
     else:
         logger.warning("Plex not yet configured — open the web UI to set up.")

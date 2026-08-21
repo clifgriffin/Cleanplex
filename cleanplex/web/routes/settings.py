@@ -42,6 +42,8 @@ class SettingsPayload(BaseModel):
     poll_interval: str | None = None
     confidence_threshold: str | None = None
     skip_buffer_ms: str | None = None
+    pre_buffer_ms: str | None = None
+    post_buffer_ms: str | None = None
     scan_step_ms: str | None = None
     scan_workers: str | None = None
     nudenet_model: str | None = None
