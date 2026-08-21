@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api/client'
-import { Film, Tv, ChevronRight, ChevronDown, RotateCcw, Zap, Moon, RefreshCw, ExternalLink, AlertTriangle, Trash2, SkipForward, Play } from 'lucide-react'
+import SkipFileImport from '../components/SkipFileImport'
+import { Film, Tv, ChevronRight, ChevronDown, RotateCcw, Zap, Moon, RefreshCw, ExternalLink, AlertTriangle, Trash2, SkipForward, Play, Tv2 } from 'lucide-react'
 
 interface Library {
   id: string
@@ -322,6 +323,22 @@ export default function Library() {
     const segs = loadedSegments[guid] || []
     return (
       <div className="mt-2 pt-2 border-t border-plex-border space-y-2">
+        <SkipFileImport
+          plexGuid={guid}
+          onImported={() => {
+            // Drop the cached list so the next expand refetches what was imported.
+            setLoadedSegments(prev => {
+              const next = { ...prev }
+              delete next[guid]
+              return next
+            })
+            setExpandedSegments(prev => {
+              const next = new Set(prev)
+              next.delete(guid)
+              return next
+            })
+          }}
+        />
         {loadingSegments.has(guid) ? (
           <p className="text-xs text-gray-500 px-1">Loading segments…</p>
         ) : segs.length === 0 ? (
@@ -357,6 +374,13 @@ export default function Library() {
                 >
                   <Play size={15} />
                 </button>
+                <a
+                  href={`/api/segments/${seg.id}/vlc`}
+                  title="Open in VLC"
+                  className="p-2 text-gray-600 hover:text-blue-400 hover:bg-blue-400/10 rounded transition-colors"
+                >
+                  <Tv2 size={15} />
+                </a>
                 <button
                   onClick={() => jumpToSegmentInline(seg.id)}
                   disabled={jumpingSegs[seg.id]}

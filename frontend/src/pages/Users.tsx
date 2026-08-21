@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
-import { UserCircle2, ShieldCheck, ShieldOff } from 'lucide-react'
+import { UserCircle2, ShieldCheck, ShieldOff, ChevronDown, ChevronRight } from 'lucide-react'
+import CategoryMatrix from '../components/CategoryMatrix'
 
 interface User {
   username: string
@@ -12,6 +13,9 @@ export default function UsersPage() {
   const [users, setUsers] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState<Record<string, boolean>>({})
+  // Only the expanded user's matrix is mounted, so switching users does not leave
+  // several category requests in flight at once.
+  const [expanded, setExpanded] = useState<string | null>(null)
 
   useEffect(() => {
     api.get<{ users: User[] }>('/api/users').then(d => {
@@ -34,7 +38,8 @@ export default function UsersPage() {
     <div className="max-w-2xl">
       <h1 className="text-2xl font-bold text-gray-100 mb-2">Users</h1>
       <p className="text-sm text-gray-500 mb-6">
-        Toggle content filtering per Plex account. Accounts with filtering enabled will have inappropriate scenes skipped automatically.
+        Toggle content filtering per Plex account, and set how strict each content category should be.
+        Accounts with filtering enabled will have flagged scenes skipped or muted automatically.
       </p>
 
       {loading ? (
@@ -46,7 +51,8 @@ export default function UsersPage() {
       ) : (
         <div className="bg-plex-card border border-plex-border rounded-xl divide-y divide-plex-border">
           {users.map(user => (
-            <div key={user.username} className="flex items-center gap-4 px-5 py-4">
+            <div key={user.username}>
+            <div className="flex items-center gap-4 px-5 py-4">
               {user.thumb ? (
                 <img
                   src={user.thumb}
@@ -59,6 +65,14 @@ export default function UsersPage() {
                   <UserCircle2 size={22} className="text-gray-500" />
                 </div>
               )}
+
+              <button
+                onClick={() => setExpanded(e => (e === user.username ? null : user.username))}
+                className="text-gray-500 hover:text-gray-300"
+                aria-label={expanded === user.username ? 'Hide categories' : 'Show categories'}
+              >
+                {expanded === user.username ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              </button>
 
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-gray-100">{user.username}</p>
@@ -84,6 +98,13 @@ export default function UsersPage() {
                   }`}
                 />
               </button>
+            </div>
+
+            {expanded === user.username && (
+              <div className="bg-plex-bg/40 border-t border-plex-border">
+                <CategoryMatrix username={user.username} enabled={user.enabled} />
+              </div>
+            )}
             </div>
           ))}
         </div>

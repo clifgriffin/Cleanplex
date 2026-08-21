@@ -1,5 +1,6 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api/client'
+import SkipAnalytics from '../components/SkipAnalytics'
 import { BarChart2, X, AlertTriangle, Trash2, Play, SkipForward, ChevronLeft, ChevronRight } from 'lucide-react'
 
 interface LabelCount {
@@ -148,14 +149,23 @@ export default function Analytics() {
     }
   }, [])
 
-  // Re-fetch when selection or page changes
+  // Single effect handles both label changes (reset to page 0) and page navigation.
+  // A ref tracks the previous labels so we can distinguish the two cases and avoid
+  // the race condition that occurs when two separate effects both depend on selectedLabels:
+  // the page effect would fire with the stale page number while the labels effect resets
+  // to 0, producing two concurrent fetches whose results arrive in arbitrary order.
+  const prevLabelsRef = useRef<string>('')
   useEffect(() => {
-    setPage(0)
-    fetchSegments(selectedLabels, 0)
-  }, [selectedLabels, fetchSegments])
-
-  useEffect(() => {
-    fetchSegments(selectedLabels, page)
+    const labelsKey = selectedLabels.join(',')
+    if (labelsKey !== prevLabelsRef.current) {
+      // Labels changed — always go back to page 0.
+      prevLabelsRef.current = labelsKey
+      setPage(0)
+      fetchSegments(selectedLabels, 0)
+    } else {
+      // Only the page changed — fetch the requested page.
+      fetchSegments(selectedLabels, page)
+    }
   }, [page, selectedLabels, fetchSegments])
 
   const toggleLabel = (label: string) => {
@@ -259,6 +269,14 @@ export default function Analytics() {
           )}
         </section>
       )}
+
+      {/* ── Skip history ───────────────────────────────────────────────────── */}
+      <section>
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">
+          Skip History
+        </h2>
+        <SkipAnalytics />
+      </section>
 
       {/* ── Label filter chips ─────────────────────────────────────────────── */}
       <section className="bg-plex-card border border-plex-border rounded-xl p-4">
