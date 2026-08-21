@@ -129,7 +129,7 @@ async def scan_subtitles(payload: SubtitleScanPayload):
     return {"imported": count, "source": "subtitles", "title": job.get("title") or ""}
 
 
-@router.get("/export/{plex_guid}")
+@router.get("/export/{plex_guid:path}")
 async def export_segments(plex_guid: str, fmt: str = "edl"):
     """Export a title's segments as EDL or MCF for use in other players."""
     from ...importers import edl, mcf

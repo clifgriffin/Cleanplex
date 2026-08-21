@@ -219,3 +219,25 @@ async def test_scanner_segments_report_scanner_defaults(http_client):
     assert segs[0]["category"] == "nudity"
     assert segs[0]["source"] == "scanner"
     assert segs[0]["action"] == "skip"
+
+
+async def test_export_handles_guids_containing_slashes(http_client):
+    """Plex GUIDs look like imdb://tt123 — the route needs the path converter."""
+    await _make_job(guid="imdb://tt32897959")
+    await db.insert_segment("imdb://tt32897959", "Test Movie", 30500, 45000)
+
+    resp = await http_client.get("/api/segments/export/imdb://tt32897959?fmt=edl")
+
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 1
+
+
+async def test_import_handles_guids_containing_slashes(http_client):
+    await _make_job(guid="imdb://tt32897959")
+
+    resp = await http_client.post(
+        "/api/segments/import", **_upload(SKP_BODY, "movie.skp", guid="imdb://tt32897959")
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["imported"] == 2
