@@ -265,6 +265,9 @@ async def init_db() -> None:
             "ALTER TABLE segments ADD COLUMN channel TEXT DEFAULT 'both'",
             "ALTER TABLE segments ADD COLUMN source TEXT DEFAULT 'scanner'",
             "CREATE INDEX IF NOT EXISTS idx_segments_guid_category ON segments(plex_guid, category)",
+            # Audio-track language a segment was authored against. Empty means it
+            # applies to every track, which is right for image-derived segments.
+            "ALTER TABLE segments ADD COLUMN language TEXT DEFAULT ''",
         ]
         for stmt in migrations:
             try:
@@ -467,6 +470,16 @@ async def get_most_skipped_titles(limit: int = 20) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+async def get_segment_categories() -> list[dict]:
+    """Return the categories that actually have segments, with counts."""
+    async with get_connection() as conn:
+        rows = await conn.execute_fetchall(
+            "SELECT COALESCE(NULLIF(category, ''), 'other') AS category, COUNT(*) AS count "
+            "FROM segments GROUP BY category ORDER BY count DESC"
+        )
+        return [dict(r) for r in rows]
+
+
 async def get_user_category_prefs(username: str) -> dict[str, dict]:
     """Return {category: {"level": int, "action": str}} for one user, empty if unset."""
     async with get_connection() as conn:
@@ -645,8 +658,8 @@ async def insert_segments_bulk(plex_guid: str, title: str, segments: list[dict],
     async with get_connection() as conn:
         await conn.executemany(
             "INSERT INTO segments(plex_guid, title, start_ms, end_ms, confidence, "
-            "labels, category, severity, action, channel, source) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "labels, category, severity, action, channel, language, source) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (
                     plex_guid,
@@ -659,6 +672,7 @@ async def insert_segments_bulk(plex_guid: str, title: str, segments: list[dict],
                     seg.get("severity", "high"),
                     seg.get("action", "skip"),
                     seg.get("channel", "both"),
+                    seg.get("language", ""),
                     source,
                 )
                 for seg in segments

@@ -1,9 +1,10 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from ...logger import get_logger
 import cleanplex.plex_client as plex_mod
 from ... import database as db
+from ...importers._common import CATEGORIES
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -52,3 +53,56 @@ async def get_users():
 async def update_user_filter(username: str, payload: UserFilterUpdate):
     await db.upsert_user_filter(username, payload.enabled)
     return {"ok": True}
+
+
+class CategoryPrefUpdate(BaseModel):
+    """One category's strictness (0-3) and optional action override."""
+    level: int = Field(0, ge=0, le=3)
+    action: str = ""
+
+
+@router.get("/{username}/categories")
+async def get_user_categories(username: str):
+    """Return a user's per-category filtering levels, plus which categories have segments.
+
+    Categories with no segments are still listed so the UI can show the full set,
+    but flagged so users are not tuning controls that cannot fire.
+    """
+    prefs = await db.get_user_category_prefs(username)
+    populated = {c["category"] for c in await db.get_segment_categories()}
+
+    return {
+        "username": username,
+        # An empty prefs map means "filter everything", which is the pre-category
+        # default; the UI renders that rather than blank controls.
+        "uses_defaults": not prefs,
+        "categories": [
+            {
+                "category": name,
+                "level": prefs.get(name, {}).get("level", 3 if not prefs else 0),
+                "action": prefs.get(name, {}).get("action", ""),
+                "has_segments": name in populated,
+            }
+            for name in CATEGORIES
+        ],
+    }
+
+
+@router.put("/{username}/categories/{category}")
+async def update_user_category(username: str, category: str, payload: CategoryPrefUpdate):
+    if category not in CATEGORIES:
+        raise HTTPException(status_code=422, detail=f"Unknown category: {category}")
+    if payload.action and payload.action not in ("skip", "mute"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported action: {payload.action}. Expected 'skip' or 'mute'.",
+        )
+    await db.upsert_user_category_pref(username, category, payload.level, payload.action)
+    return {"ok": True}
+
+
+@router.delete("/{username}/categories")
+async def reset_user_categories(username: str):
+    """Clear a user's category preferences, reverting them to the defaults."""
+    removed = await db.delete_user_category_prefs(username)
+    return {"ok": True, "removed": removed}

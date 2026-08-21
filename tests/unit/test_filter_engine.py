@@ -556,3 +556,67 @@ async def test_verification_state_is_reaped_with_the_session():
     await fe.reap(set())
 
     assert fe._pending_verification == {}
+
+
+# ── Language-aware matching (issue #73) ────────────────────────────────────────
+
+async def test_segment_without_language_applies_to_every_track():
+    session = _session(position_ms=35000)
+    session.audio_language = "fra"
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000, language=""))
+        await fe.process(session, client)
+
+    client.seek.assert_awaited_once()
+
+
+async def test_english_segment_does_not_fire_on_the_french_track():
+    session = _session(position_ms=35000)
+    session.audio_language = "fra"
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000, language="eng", category="language", action="mute"))
+        await fe.process(session, client)
+
+    client.seek.assert_not_called()
+    client.set_volume.assert_not_called()
+
+
+async def test_matching_language_fires():
+    session = _session(position_ms=35000, volume=50)
+    session.audio_language = "eng"
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000, language="eng", action="mute"))
+        await fe.process(session, client)
+
+    client.set_volume.assert_awaited()
+
+
+async def test_two_and_three_letter_codes_are_treated_as_equal():
+    """Plex reports 'en' or 'eng' depending on the source; both must match."""
+    session = _session(position_ms=35000)
+    session.audio_language = "en"
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000, language="eng"))
+        await fe.process(session, client)
+
+    client.seek.assert_awaited_once()
+
+
+async def test_unknown_session_language_applies_all_segments():
+    session = _session(position_ms=35000)
+    session.audio_language = ""
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000, language="eng"))
+        await fe.process(session, client)
+
+    client.seek.assert_awaited_once()

@@ -181,13 +181,13 @@ async def load_wordlist() -> list[str]:
     return DEFAULT_WORDLIST
 
 
-async def scan_title(plex_guid: str, title: str, file_path: str) -> int:
+async def scan_title(plex_guid: str, title: str, file_path: str, language: str = "eng") -> int:
     """Scan one title's subtitles and store language segments. Returns the count."""
     sidecar = find_sidecar_subtitle(file_path)
     if sidecar is not None:
         text = sidecar.read_text(encoding="utf-8", errors="replace")
     else:
-        text = await extract_embedded_subtitle(file_path)
+        text = await extract_embedded_subtitle(file_path, language)
 
     if not text:
         logger.info("No subtitles available for '%s' — nothing to scan", title)
@@ -195,6 +195,9 @@ async def scan_title(plex_guid: str, title: str, file_path: str) -> int:
 
     pattern = build_pattern(await load_wordlist())
     segments = find_hits(parse_subtitles(text), pattern)
+    # Stamp the track these timings came from: they do not hold for a dub.
+    for seg in segments:
+        seg["language"] = language
     if not segments:
         logger.info("No listed words found in subtitles for '%s'", title)
         return 0

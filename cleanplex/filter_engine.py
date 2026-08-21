@@ -64,6 +64,24 @@ async def reap(active_session_keys: set[str], client: PlexClient | None = None) 
             del state[key]
 
 
+def _matches_language(segment: dict, audio_language: str) -> bool:
+    """Return True if this segment applies to the track being played.
+
+    An empty segment language means "any track", which is right for image-derived
+    segments. A profanity mute authored against the English track would land on
+    unrelated dialogue in a dub, so those only fire on their own language. When the
+    session's language cannot be determined, everything applies — the previous
+    behaviour, and safer than silently filtering nothing.
+    """
+    seg_language = (segment.get("language") or "").strip().lower()
+    if not seg_language or not audio_language:
+        return True
+    # Plex reports both 2- and 3-letter codes depending on the source, so compare
+    # on the shorter prefix rather than demanding an exact match.
+    shortest = min(len(seg_language), len(audio_language))
+    return seg_language[:shortest] == audio_language[:shortest]
+
+
 def _is_filtered(segment: dict, prefs: dict[str, dict]) -> bool:
     """Return True if this segment should be acted on for a viewer with these prefs."""
     if not prefs:
@@ -140,6 +158,8 @@ async def process(
         # Trigger when approaching the segment (within lookahead_ms before start) or already inside.
         # This compensates for polling latency so the action fires before/at the segment start.
         if not (seg["start_ms"] - lookahead_ms <= pos <= seg["end_ms"]):
+            continue
+        if not _matches_language(seg, session.audio_language):
             continue
         if not _is_filtered(seg, prefs):
             continue

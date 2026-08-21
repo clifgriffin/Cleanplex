@@ -44,6 +44,9 @@ class ActiveSession:
     # Player volume 0-100, or None when the client does not report one. Captured so
     # a mute can restore the viewer's own level rather than guessing 100.
     volume: int | None = None
+    # ISO code of the audio track being played, empty when it cannot be determined.
+    # Language-specific segments (profanity mutes) only apply to their own track.
+    audio_language: str = ""
 
 
 @dataclass
@@ -159,8 +162,19 @@ class PlexClient:
 
                 # Resolve file path
                 file_path = ""
+                audio_language = ""
                 if s.media and s.media[0].parts:
-                    file_path = s.media[0].parts[0].file or ""
+                    part = s.media[0].parts[0]
+                    file_path = part.file or ""
+                    # The selected stream is what the viewer actually hears; fall
+                    # back to the first audio stream when Plex marks none selected.
+                    streams = [st for st in (getattr(part, "audioStreams", None) or [])]
+                    selected = next((st for st in streams if getattr(st, "selected", False)), None)
+                    chosen = selected or (streams[0] if streams else None)
+                    if chosen is not None:
+                        audio_language = (
+                            getattr(chosen, "languageCode", "") or getattr(chosen, "language", "") or ""
+                        ).lower()
 
                 # GUID — prefer the first one that looks useful
                 guid = ""
@@ -190,6 +204,7 @@ class PlexClient:
                         thumb=s.thumb or "",
                         library_section_id=section_id,
                         volume=volume,
+                        audio_language=audio_language,
                     )
                 )
             except Exception as exc:
