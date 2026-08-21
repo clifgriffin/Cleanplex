@@ -488,10 +488,21 @@ Steps 3–5 catch runtime errors (missing attributes, import failures, startup c
 
 ### 10.3 Production Restart Procedure
 
-Never kill production before the replacement is confirmed healthy:
+**Production runs as a Windows service**, `Cleanplex`, supervised by NSSM as LocalSystem and
+launching `.venv/Scripts/cleanplex.exe` from this repo. The package is installed editable, so a
+restart is all that is needed to pick up new code — no reinstall, no copy step.
 
-1. Start replacement on a different port OR confirm the dev instance passes all checks
-2. Kill production: `powershell -Command "Get-Process cleanplex -ErrorAction SilentlyContinue | Stop-Process -Force"`
-3. Start production: `.venv/Scripts/cleanplex.exe > cleanplex_restart.log 2>&1 &`
+Because the service runs as LocalSystem, **restarting it requires an elevated shell**. A normal
+session gets `Access is denied` from `Stop-Process` and `Cannot open Cleanplex service` from
+`Restart-Service`. Do not try to kill the process directly; it is supervised and NSSM will fight you.
+
+1. Confirm the dev instance passes every check in §10.2
+2. Back up the database first — migrations run against it on startup:
+   `cp ~/.cleanplex/cleanplex.db ~/.cleanplex/cleanplex.db.bak-$(date +%Y%m%d-%H%M%S)`
+3. Restart, **from an elevated PowerShell**: `Restart-Service -Name Cleanplex -Force`
 4. Verify: poll `http://localhost:7979/api/settings` until it responds
-5. Check log for errors before declaring done
+5. Confirm the process actually recycled — its PID must differ from the pre-restart one
+6. Check `cleanplex.log` for errors before declaring done
+
+If the deploy is being run by an agent or any non-elevated session, it must stop at step 3 and hand
+the command to a human. Reporting a deploy as done without a changed PID is a false success.
