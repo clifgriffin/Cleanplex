@@ -230,6 +230,9 @@ async def init_db() -> None:
             # part_files stores a JSON array of all file paths for multi-part movies
             # (e.g. CD1/CD2 rips). Empty string means single-file title.
             "ALTER TABLE scan_jobs ADD COLUMN part_files TEXT DEFAULT ''",
+            # Runtime in milliseconds, used to sanity-check imported skip files
+            # against the release actually in the library. 0 means unknown.
+            "ALTER TABLE scan_jobs ADD COLUMN duration_ms INTEGER DEFAULT 0",
             # Content classification, following the MovieContentFilter 1.1.0
             # vocabulary. Defaults describe what the NudeNet scanner produces, so
             # rows written before this migration read back correctly.
@@ -667,13 +670,14 @@ async def upsert_scan_job(
     show_guid: str = "",
     show_rating_key: str = "",
     part_files: str = "",
+    duration_ms: int = 0,
 ) -> None:
     async with get_connection() as conn:
         await conn.execute(
             "INSERT OR IGNORE INTO scan_jobs"
-            "(plex_guid, title, file_path, part_files, rating_key, library_id, library_title, content_rating, media_type, year, show_guid, show_rating_key) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (plex_guid, title, file_path, part_files, rating_key, library_id, library_title, content_rating, media_type, year, show_guid, show_rating_key),
+            "(plex_guid, title, file_path, part_files, rating_key, library_id, library_title, content_rating, media_type, year, show_guid, show_rating_key, duration_ms) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (plex_guid, title, file_path, part_files, rating_key, library_id, library_title, content_rating, media_type, year, show_guid, show_rating_key, duration_ms),
         )
         await conn.commit()
 

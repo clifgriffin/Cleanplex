@@ -67,6 +67,7 @@ class MediaItem:
     content_rating: str = ""   # e.g. "PG-13", "R", "TV-MA"
     show_guid: str = ""        # grandparentGuid for episodes; empty for movies
     show_rating_key: str = ""  # grandparentRatingKey for episodes; used to build poster URLs from DB
+    duration_ms: int = 0       # runtime, used to sanity-check imported skip files
     # Ordered list of all part file paths for multi-part movies (e.g. CD1/CD2).
     # file_path holds parts[0]; part_files holds the full list.
     # Empty for single-file titles.
@@ -465,6 +466,7 @@ class PlexClient:
                 show_guid=show_guid,
                 show_rating_key=show_rating_key,
                 part_files=part_files,
+                duration_ms=int(getattr(item, "duration", 0) or 0),
             )
         except Exception:
             return None

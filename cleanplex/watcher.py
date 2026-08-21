@@ -10,6 +10,7 @@ from datetime import datetime
 from .logger import get_logger
 from . import database as db
 from . import filter_engine
+from . import importers
 from .scanner import enqueue, enqueue_pending, scanner_loop
 
 logger = get_logger(__name__)
@@ -65,6 +66,32 @@ async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
         await asyncio.sleep(config.poll_interval)
 
 
+async def _import_sidecar(item) -> bool:
+    """Import a skip file sitting next to the media, if there is one.
+
+    Returns True when segments were imported, meaning the title needs no ML scan.
+    File I/O is small (a few KB of text) and runs once per newly discovered title,
+    so it is read inline rather than through a thread.
+    """
+    try:
+        sidecar = importers.find_sidecar(item.file_path)
+        if sidecar is None:
+            return False
+
+        segments, source = importers.parse_file(sidecar)
+        count = await db.insert_segments_bulk(item.plex_guid, item.title, segments, source)
+        await db.update_scan_job_status(item.plex_guid, "completed", progress=100)
+        logger.info(
+            "Imported %d segment(s) for '%s' from %s — skipping ML scan",
+            count, item.title, sidecar.name,
+        )
+        return count > 0
+    except Exception as exc:
+        # A malformed sidecar must not stop the title being scanned normally.
+        logger.warning("Could not import sidecar for '%s': %s", item.title, exc)
+        return False
+
+
 async def library_watcher_loop(get_config_fn, get_client_fn) -> None:
     """Periodically check for new Plex library items and enqueue unscanned ones."""
     first_run = True
@@ -106,7 +133,13 @@ async def library_watcher_loop(get_config_fn, get_client_fn) -> None:
                             year=item.year,
                             show_guid=item.show_guid,
                             part_files=json.dumps(item.part_files),
+                            duration_ms=item.duration_ms,
                         )
+                        # A skip file sitting beside the media is authoritative and
+                        # free: importing it skips frame extraction and inference
+                        # entirely, so only enqueue a scan when there isn't one.
+                        if await _import_sidecar(item):
+                            continue
                         await enqueue(item.plex_guid)
                         logger.info("New item queued for scan: %s", item.title)
                     elif not existing.get("part_files") and len(item.part_files) > 1:
