@@ -53,9 +53,16 @@ function renderSettings() {
 }
 
 beforeEach(() => {
-  vi.useFakeTimers()
+  // shouldAdvanceTime lets the real clock keep moving under the fake timers, so
+  // testing-library's waitFor can still poll. Without it every waitFor in this
+  // file hangs until the 5s test timeout.
+  vi.useFakeTimers({ shouldAdvanceTime: true })
   mockApi.get.mockImplementation((path: string) => {
-    if (path.includes('settings')) return Promise.resolve({ settings: defaultSettings })
+    // detector-labels is checked first: it also contains 'settings' in its path.
+    if (path.includes('detector-labels')) return Promise.resolve({ labels: [] })
+    if (path.includes('sync/status')) return Promise.resolve(null)
+    // /api/settings returns the settings object flat, not wrapped.
+    if (path.includes('settings')) return Promise.resolve(defaultSettings)
     if (path.includes('libraries')) return Promise.resolve({ libraries: [] })
     return Promise.resolve({})
   })
@@ -94,7 +101,10 @@ describe('Settings', () => {
     })
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes('job')) return Promise.resolve({ status: 'running', progress: 50, error: null, result: null })
-      if (path.includes('settings')) return Promise.resolve({ settings: defaultSettings })
+      if (path.includes('detector-labels')) return Promise.resolve({ labels: [] })
+      if (path.includes('sync/status')) return Promise.resolve(null)
+      if (path.includes('settings')) return Promise.resolve(defaultSettings)
+      if (path.includes('libraries')) return Promise.resolve({ libraries: [] })
       return Promise.resolve({})
     })
 

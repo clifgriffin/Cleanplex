@@ -38,7 +38,10 @@ function renderDashboard() {
 }
 
 beforeEach(() => {
-  vi.useFakeTimers()
+  // shouldAdvanceTime lets the real clock keep moving under the fake timers, so
+  // testing-library's waitFor can still poll. Without it every waitFor in this
+  // file hangs until the 5s test timeout.
+  vi.useFakeTimers({ shouldAdvanceTime: true })
   mockApi.get.mockImplementation((path: string) => {
     if (path.includes('events')) return Promise.resolve(emptyEvents)
     if (path.includes('scanner-status')) return Promise.resolve(scannerIdle)

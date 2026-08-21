@@ -40,7 +40,10 @@ function renderLibrary() {
 }
 
 beforeEach(() => {
-  vi.useFakeTimers()
+  // shouldAdvanceTime lets the real clock keep moving under the fake timers, so
+  // testing-library's waitFor can still poll. Without it every waitFor in this
+  // file hangs until the 5s test timeout.
+  vi.useFakeTimers({ shouldAdvanceTime: true })
   mockApi.get.mockImplementation((path: string) => {
     if (path.includes('scanner-status')) return Promise.resolve(scannerIdle)
     if (path.includes('libraries') && !path.includes('titles')) return Promise.resolve({ libraries })
@@ -56,20 +59,23 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+// The page renders a mobile picker and a desktop layout side by side, so library
+// names and the heading legitimately appear more than once. Assert on the first
+// match rather than demanding a unique one.
 describe('Library', () => {
   it('renders the page heading', async () => {
     renderLibrary()
-    await waitFor(() => expect(screen.getByText('Library')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getAllByText('Library')[0]).toBeInTheDocument())
   })
 
   it('shows library dropdown with loaded libraries', async () => {
     renderLibrary()
-    await waitFor(() => expect(screen.getByText('Movies')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getAllByText('Movies')[0]).toBeInTheDocument())
   })
 
   it('does NOT trigger sync automatically when a library is selected', async () => {
     renderLibrary()
-    await waitFor(() => screen.getByText('Movies'))
+    await waitFor(() => screen.getAllByText('Movies')[0])
 
     const select = screen.getByRole('combobox')
     await act(async () => {
@@ -86,7 +92,7 @@ describe('Library', () => {
 
   it('has an explicit "Sync from Plex" button that triggers sync on click', async () => {
     renderLibrary()
-    await waitFor(() => screen.getByText('Movies'))
+    await waitFor(() => screen.getAllByText('Movies')[0])
     const select = screen.getByRole('combobox')
     await act(async () => {
       fireEvent.change(select, { target: { value: 'lib1' } })
@@ -110,7 +116,7 @@ describe('Library', () => {
 
   it('displays titles after library is selected', async () => {
     renderLibrary()
-    await waitFor(() => screen.getByText('Movies'))
+    await waitFor(() => screen.getAllByText('Movies')[0])
     const select = screen.getByRole('combobox')
     await act(async () => {
       fireEvent.change(select, { target: { value: 'lib1' } })
@@ -147,7 +153,7 @@ describe('Library', () => {
     )
 
     renderLibrary()
-    await waitFor(() => screen.getByText('Movies'))
+    await waitFor(() => screen.getAllByText('Movies')[0])
     const select = screen.getByRole('combobox')
     await act(async () => {
       fireEvent.change(select, { target: { value: 'lib1' } })
@@ -155,12 +161,14 @@ describe('Library', () => {
     await waitFor(() => screen.getByText('Movie 0'))
 
     // Select all and scan
-    const selectAllCheckbox = screen.queryByRole('checkbox', { name: /select all/i })
+    const selectAllCheckbox = screen.queryAllByRole('checkbox', { name: /select all/i })[0]
     if (selectAllCheckbox) {
       await act(async () => { fireEvent.click(selectAllCheckbox) })
     }
 
-    const scanBtn = screen.queryByRole('button', { name: /scan selected/i })
+    // Mobile and desktop layouts each render the action bar; either button drives
+    // the same handler, so clicking the first is enough.
+    const scanBtn = screen.queryAllByRole('button', { name: /scan selected/i })[0]
     if (scanBtn) {
       await act(async () => {
         fireEvent.click(scanBtn)
@@ -174,7 +182,7 @@ describe('Library', () => {
   it('aborts polling on unmount', async () => {
     const abortSpy = vi.spyOn(AbortController.prototype, 'abort')
     const { unmount } = renderLibrary()
-    await waitFor(() => screen.getByText('Library'))
+    await waitFor(() => screen.getAllByText('Library')[0])
     unmount()
     expect(abortSpy).toHaveBeenCalled()
   })
