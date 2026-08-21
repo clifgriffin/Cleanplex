@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
-import { Film, Tv, ChevronRight, ChevronDown, Trash2, AlertTriangle, SkipForward, Play } from 'lucide-react'
+import { Film, Tv, ChevronRight, ChevronDown, Trash2, AlertTriangle, SkipForward, Play, Tv2 } from 'lucide-react'
 
 interface Library {
   id: string
@@ -157,6 +157,9 @@ function SegmentCard({
           <button onClick={() => onPreview(seg)} title="Preview this segment in-app" className="p-2 text-gray-600 hover:text-green-400 hover:bg-green-400/10 rounded-lg transition-colors">
             <Play size={16} />
           </button>
+          <a href={`/api/segments/${seg.id}/vlc`} title="Open in VLC" className="p-2 text-gray-600 hover:text-blue-400 hover:bg-blue-400/10 rounded-lg transition-colors">
+            <Tv2 size={16} />
+          </a>
           <button onClick={() => onJump(seg.id)} disabled={jumping[seg.id]} title="Jump active Plex playback for this title to this segment" className="p-2 text-gray-600 hover:text-plex-orange hover:bg-plex-orange/10 rounded-lg transition-colors disabled:opacity-40">
             <SkipForward size={16} />
           </button>
@@ -179,9 +182,14 @@ export default function Segments() {
   const [loadingSegs, setLoadingSegs] = useState(false)
   const [deleting, setDeleting] = useState<Record<number, boolean>>({})
   const [deletingAll, setDeletingAll] = useState(false)
+  const [deletingTitle, setDeletingTitle] = useState<Record<string, boolean>>({})
+  const [confirmDeleteTitle, setConfirmDeleteTitle] = useState<Title | null>(null)
+  const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<{ label: string; titles: Title[] } | null>(null)
+  const [deletingGroup, setDeletingGroup] = useState(false)
   const [jumping, setJumping] = useState<Record<number, boolean>>({})
   const [previewSeg, setPreviewSeg] = useState<Segment | null>(null)
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false)
+  const [skipDeleteConfirm, setSkipDeleteConfirm] = useState(() => localStorage.getItem('skipDeleteConfirm') === 'true')
   const [expandedEpisodes, setExpandedEpisodes] = useState<Set<string>>(new Set())
   const [expandedShows, setExpandedShows] = useState<Set<string>>(new Set())
   const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(new Set())
@@ -388,6 +396,55 @@ export default function Segments() {
     }
   }
 
+  const toggleSkipConfirm = (val: boolean) => {
+    localStorage.setItem('skipDeleteConfirm', String(val))
+    setSkipDeleteConfirm(val)
+  }
+
+  const deleteSegmentsForGroup = async (label: string, groupTitles: Title[]) => {
+    setDeletingGroup(true)
+    try {
+      await Promise.all(groupTitles.map(t => api.delete(`/api/titles/${encodeURIComponent(t.plex_guid)}/segments`)))
+      if (selectedLib) {
+        const d = await api.get<{ titles: Title[] }>(`/api/libraries/${selectedLib.id}/titles`)
+        const visibleTitles = d.titles.filter(t => t.segment_count > 0)
+        setTitles(visibleTitles)
+        if (selectedGroup?.label === label || groupTitles.some(t => t.plex_guid === selectedTitle?.plex_guid)) {
+          setSelectedTitle(null)
+          setSelectedGroup(null)
+          setSegments([])
+        }
+      }
+      setConfirmDeleteGroup(null)
+    } finally {
+      setDeletingGroup(false)
+    }
+  }
+
+  const deleteSegmentsForTitle = async (title: Title) => {
+    setDeletingTitle(d => ({ ...d, [title.plex_guid]: true }))
+    try {
+      await api.delete(`/api/titles/${encodeURIComponent(title.plex_guid)}/segments`)
+      if (selectedLib) {
+        const d = await api.get<{ titles: Title[] }>(`/api/libraries/${selectedLib.id}/titles`)
+        const visibleTitles = d.titles.filter(t => t.segment_count > 0)
+        setTitles(visibleTitles)
+        if (selectedTitle?.plex_guid === title.plex_guid) {
+          setSelectedTitle(null)
+          setSegments([])
+        } else if (selectedGroup) {
+          const sd = await api.post<{ segments: Segment[] }>('/api/titles/segments/batch', {
+            guids: selectedGroup.titles.map(t => t.plex_guid),
+          })
+          setSegments(sd.segments)
+        }
+      }
+      setConfirmDeleteTitle(null)
+    } finally {
+      setDeletingTitle(d => ({ ...d, [title.plex_guid]: false }))
+    }
+  }
+
   const jumpToSegment = async (id: number) => {
     setJumping(j => ({ ...j, [id]: true }))
     try {
@@ -496,10 +553,17 @@ export default function Segments() {
                           </button>
                           <button
                             onClick={() => selectGroup('show', showGroup.show, showGroup.seasons.flatMap(s => s.episodes))}
-                            className="flex-1 flex items-center gap-1 px-1 py-1.5 text-left text-gray-300 hover:text-gray-100 truncate"
+                            className="flex-1 flex items-center gap-1 px-1 py-1.5 text-left text-gray-300 hover:text-gray-100 truncate min-w-0"
                           >
                             <span className="truncate font-medium">{showGroup.show}</span>
                             <span className="flex-shrink-0 text-gray-600 ml-auto">{showGroup.totalSegments}</span>
+                          </button>
+                          <button
+                            onClick={() => { const ep = showGroup.seasons.flatMap(s => s.episodes); skipDeleteConfirm ? deleteSegmentsForGroup(showGroup.show, ep) : setConfirmDeleteGroup({ label: showGroup.show, titles: ep }) }}
+                            title="Delete all segments for this show"
+                            className="px-1.5 py-1.5 text-gray-600 hover:text-red-400 flex-shrink-0 transition-colors"
+                          >
+                            <Trash2 size={11} />
                           </button>
                         </div>
                         {expandedShows.has(showGroup.show) && showGroup.seasons.map(seasonGroup => {
@@ -524,18 +588,30 @@ export default function Segments() {
                                 </button>
                               </div>
                               {expandedSeasons.has(seasonKey) && seasonGroup.episodes.map(t => (
-                                <button
+                                <div
                                   key={t.plex_guid}
-                                  onClick={() => selectTitle(t)}
-                                  className={`w-full flex items-center gap-1.5 px-2 py-1 rounded text-xs text-left ml-2 transition-colors ${
+                                  className={`group flex items-center rounded text-xs ml-2 transition-colors ${
                                     selectedTitle?.plex_guid === t.plex_guid
                                       ? 'bg-white/10 text-gray-100'
                                       : 'text-gray-500 hover:text-gray-200 hover:bg-white/5'
                                   }`}
                                 >
-                                  <span className="truncate flex-1">{parseShowInfo(t.title).episode}</span>
-                                  <span className="flex-shrink-0 text-gray-600">{t.segment_count}</span>
-                                </button>
+                                  <button
+                                    onClick={() => selectTitle(t)}
+                                    className="flex-1 flex items-center gap-1.5 px-2 py-1 text-left min-w-0"
+                                  >
+                                    <span className="truncate flex-1">{parseShowInfo(t.title).episode}</span>
+                                    <span className="flex-shrink-0 text-gray-600">{t.segment_count}</span>
+                                  </button>
+                                  <button
+                                    onClick={() => skipDeleteConfirm ? deleteSegmentsForTitle(t) : setConfirmDeleteTitle(t)}
+                                    disabled={deletingTitle[t.plex_guid]}
+                                    title="Delete all segments for this episode"
+                                    className="px-1.5 py-1 text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 disabled:opacity-30"
+                                  >
+                                    <Trash2 size={11} />
+                                  </button>
+                                </div>
                               ))}
                             </div>
                           )
@@ -545,18 +621,30 @@ export default function Segments() {
                   ) : (
                     // Movies: flat list
                     titles.map(t => (
-                      <button
+                      <div
                         key={t.plex_guid}
-                        onClick={() => selectTitle(t)}
-                        className={`w-full flex items-center gap-1.5 px-2 py-1.5 rounded text-xs text-left transition-colors ${
+                        className={`group flex items-center rounded text-xs transition-colors ${
                           selectedTitle?.plex_guid === t.plex_guid
                             ? 'bg-white/10 text-gray-100'
                             : 'text-gray-500 hover:text-gray-200 hover:bg-white/5'
                         }`}
                       >
-                        <span className="truncate flex-1">{t.title}</span>
-                        <span className="flex-shrink-0 text-gray-600">{t.segment_count}</span>
-                      </button>
+                        <button
+                          onClick={() => selectTitle(t)}
+                          className="flex-1 flex items-center gap-1.5 px-2 py-1.5 text-left min-w-0"
+                        >
+                          <span className="truncate flex-1">{t.title}</span>
+                          <span className="flex-shrink-0 text-gray-600">{t.segment_count}</span>
+                        </button>
+                        <button
+                          onClick={() => skipDeleteConfirm ? deleteSegmentsForTitle(t) : setConfirmDeleteTitle(t)}
+                          disabled={deletingTitle[t.plex_guid]}
+                          title="Delete all segments for this title"
+                          className="px-1.5 py-1.5 text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 disabled:opacity-30"
+                        >
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
                     ))
                   )}
                 </div>
@@ -677,7 +765,7 @@ export default function Segments() {
               </div>
               {segments.length > 0 && (
                 <button
-                  onClick={() => setConfirmDeleteAll(true)}
+                  onClick={() => skipDeleteConfirm ? deleteAllSegments() : setConfirmDeleteAll(true)}
                   disabled={deletingAll}
                   className="px-3 py-1.5 text-xs bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-40 flex-shrink-0"
                 >
@@ -742,6 +830,19 @@ export default function Segments() {
                     <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-plex-card border border-plex-border mb-2">
                       <span className="text-sm font-semibold text-gray-200 truncate flex-1">{episodeLabel(group.title)}</span>
                       <span className="text-xs text-gray-500 flex-shrink-0">{group.segments.length} segment{group.segments.length !== 1 ? 's' : ''}</span>
+                      {(() => {
+                        const episodeTitle = selectedGroup?.titles.find(t => t.title === group.title)
+                        return episodeTitle ? (
+                          <button
+                            onClick={() => skipDeleteConfirm ? deleteSegmentsForTitle(episodeTitle) : setConfirmDeleteTitle(episodeTitle)}
+                            disabled={deletingTitle[episodeTitle.plex_guid]}
+                            title="Delete all segments for this episode"
+                            className="p-1 text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 disabled:opacity-30"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        ) : null
+                      })()}
                     </div>
                     <div className="ml-4 space-y-2">
                       {group.segments.map(seg => (
@@ -763,6 +864,76 @@ export default function Segments() {
         )}
 
 
+        {confirmDeleteGroup && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="w-full max-w-sm bg-plex-card border border-plex-border rounded-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-plex-border">
+                <h3 className="text-sm font-semibold text-gray-100">Delete All Segments?</h3>
+              </div>
+              <div className="p-4">
+                <p className="text-sm text-gray-300 mb-4">
+                  Delete all segments for every episode of <strong>{confirmDeleteGroup.label}</strong>? This cannot be undone.
+                </p>
+                <label className="flex items-center gap-2 mb-4 cursor-pointer select-none">
+                  <input type="checkbox" checked={skipDeleteConfirm} onChange={e => toggleSkipConfirm(e.target.checked)} className="accent-plex-orange" />
+                  <span className="text-xs text-gray-400">Don't ask again</span>
+                </label>
+                <div className="flex gap-2 justify-end">
+                  <button
+                    onClick={() => setConfirmDeleteGroup(null)}
+                    disabled={deletingGroup}
+                    className="px-3 py-1.5 text-xs bg-plex-card border border-plex-border rounded-lg text-gray-300 hover:text-white hover:border-gray-500 transition-colors disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => deleteSegmentsForGroup(confirmDeleteGroup.label, confirmDeleteGroup.titles)}
+                    disabled={deletingGroup}
+                    className="px-3 py-1.5 text-xs bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-40"
+                  >
+                    {deletingGroup ? 'Deleting...' : 'Delete All'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {confirmDeleteTitle && (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="w-full max-w-sm bg-plex-card border border-plex-border rounded-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-plex-border">
+                <h3 className="text-sm font-semibold text-gray-100">Delete All Segments?</h3>
+              </div>
+              <div className="p-4">
+                <p className="text-sm text-gray-300 mb-4">
+                  Delete all {confirmDeleteTitle.segment_count} segment{confirmDeleteTitle.segment_count !== 1 ? 's' : ''} for <strong>{confirmDeleteTitle.title}</strong>? This cannot be undone.
+                </p>
+                <label className="flex items-center gap-2 mb-4 cursor-pointer select-none">
+                  <input type="checkbox" checked={skipDeleteConfirm} onChange={e => toggleSkipConfirm(e.target.checked)} className="accent-plex-orange" />
+                  <span className="text-xs text-gray-400">Don't ask again</span>
+                </label>
+                <div className="flex gap-2 justify-end">
+                  <button
+                    onClick={() => setConfirmDeleteTitle(null)}
+                    disabled={deletingTitle[confirmDeleteTitle.plex_guid]}
+                    className="px-3 py-1.5 text-xs bg-plex-card border border-plex-border rounded-lg text-gray-300 hover:text-white hover:border-gray-500 transition-colors disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => deleteSegmentsForTitle(confirmDeleteTitle)}
+                    disabled={deletingTitle[confirmDeleteTitle.plex_guid]}
+                    className="px-3 py-1.5 text-xs bg-red-500/20 border border-red-500/30 rounded-lg text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-40"
+                  >
+                    {deletingTitle[confirmDeleteTitle.plex_guid] ? 'Deleting...' : 'Delete All'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {confirmDeleteAll && (selectedTitle || selectedGroup) && (
           <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
             <div className="w-full max-w-sm bg-plex-card border border-plex-border rounded-xl overflow-hidden">
@@ -773,6 +944,10 @@ export default function Segments() {
                 <p className="text-sm text-gray-300 mb-4">
                   Are you sure you want to delete all {segments.length} segment{segments.length !== 1 ? 's' : ''} for <strong>{selectedGroup?.label ?? selectedTitle?.title}</strong>? This cannot be undone.
                 </p>
+                <label className="flex items-center gap-2 mb-4 cursor-pointer select-none">
+                  <input type="checkbox" checked={skipDeleteConfirm} onChange={e => toggleSkipConfirm(e.target.checked)} className="accent-plex-orange" />
+                  <span className="text-xs text-gray-400">Don't ask again</span>
+                </label>
                 <div className="flex gap-2 justify-end">
                   <button
                     onClick={() => setConfirmDeleteAll(false)}
