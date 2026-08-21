@@ -84,7 +84,10 @@ All configuration is done via the **web UI** at `http://your-server:7979/setting
 | Plex Token | — | Your Plex authentication token |
 | Poll Interval | 5s | How often to check active streams |
 | Confidence Threshold | 0.6 | NudeNet score threshold (0–1). Lower = more sensitive. |
-| Skip Buffer | 3000ms | Extra milliseconds to seek past the end of segments (in addition to the 5-second post-segment buffer) |
+| Pre Buffer | 3000ms | Milliseconds to start the skip *before* a segment, so the flagged content is never briefly shown |
+| Post Buffer | 3000ms | Milliseconds to hold past the end of a segment before the filter can re-trigger |
+| Profanity Wordlist | built-in | JSON array of words the subtitle scanner mutes. Empty uses the bundled list |
+| Skip Event Retention | 90 days | How long skip history is kept before being pruned at startup |
 | Scan Window | 23:00–06:00 | Time window when background scanning runs |
 | Scanner Workers | 2 | Number of parallel scans (higher = more CPU/memory usage) |
 | Detector Labels | — | Select which nudity types to detect (and skip). Only selected labels trigger skips |
@@ -92,12 +95,69 @@ All configuration is done via the **web UI** at `http://your-server:7979/setting
 
 ## Segment Expansion & Skip Logic
 
-**Default behavior:** When a nudity segment is detected (e.g., 30s–60s), Cleanplex automatically:
-1. **Expands the segment by ±5 seconds** in the database → 25s–65s (catches any missed leading/trailing nudity)
-2. **Monitors with 5s lookahead** — the filter triggers at 20s (5s before the expanded start) to account for polling latency
-3. **Skips to 25s** and holds the block until playback reaches 65s
+**Default behavior:** When a segment is detected (e.g., 30s–60s), Cleanplex automatically:
+1. **Widens the segment** by the Pre and Post Buffer settings → 27s–63s at the 3000ms defaults
+2. **Monitors with a lookahead** of one poll interval — the filter triggers before the widened start to absorb polling latency
+3. **Skips to 27s** and holds the block until playback reaches 63s
 
-This ensures no inappropriate content is shown, even if the detector's boundaries were slightly off.
+Polling tightens automatically as a stream approaches a segment, so skips land accurately without
+polling Plex hard the rest of the time. Every skip is verified on the next tick: a client that
+accepts the command without actually moving is recorded as a failure and re-probed.
+
+### Categories, severity and actions
+
+Segments carry a **category** (nudity, sex, violence, language, drugs, fear, commercial, …), a
+**severity** (low/medium/high) and an **action**:
+
+| Action | Behaviour |
+|---|---|
+| `skip` | Seeks past the segment |
+| `mute` | Drops the volume for the segment and restores it after — used for profanity |
+
+Each user gets a 0–3 level per category. A segment fires when *level + severity* exceeds 3, so
+level 3 filters everything in that category and level 0 filters nothing. Users with no saved
+preferences have everything filtered, matching the previous behaviour.
+
+`blank` and `blur` appear in some imported files but are **not supported**: Plex exposes playback
+position and volume, not the video stream. Those segments are logged and ignored rather than
+misapplied as skips.
+
+## Importing Skip Files
+
+Cleanplex reads skip files produced by other tools. **A title with an imported file is never
+ML-scanned**, so this is by far the cheapest way to fill your library.
+
+| Format | Extension | Notes |
+|---|---|---|
+| VideoSkip | `.skp` | Categories, 1–3 severity, and skip/mute/blank handling. The VideoSkip Exchange has ~563 movies and ~110 series, free and without an account |
+| Kodi / MPlayer EDL | `.edl` | `start end action`; 0 cut, 1 mute, 2 scene marker, 3 commercial. Also exported |
+| MovieContentFilter | `.mcf` | Spec 1.1.0, ~130 hierarchical categories. Also exported |
+| Pasted list | `.txt` | Loose `00:12:30 - 00:13:05 nudity` lines, for lists that have no machine format |
+
+Two ways in:
+
+- **Sidecar** — drop `movie.skp` (or `.edl` / `.mcf`) next to `movie.mkv`. It is imported when the
+  title is first discovered and the scan is skipped entirely.
+- **Library page** — expand a title and use the import box to upload a file or paste a list.
+
+Imported timings are authored against a specific cut of a film. Cleanplex checks them against the
+title's runtime and warns when they do not line up, since an extended edition will throw every
+timestamp out.
+
+Plex itself does not read `.edl` files, so EDL/MCF export is for Kodi, Jellyfin and mpv.
+
+## Profanity Filtering
+
+Subtitles are scanned against a configurable wordlist and matching lines become **muted** segments —
+no frames, no inference, seconds per title. Matching uses word boundaries with suffix handling, so
+"shitting" is caught while "classic" is not.
+
+Because the timings come from one audio track, these segments are tagged with that track's language
+and only fire when it is the one playing; a dubbed track is left alone rather than muted in the
+wrong places.
+
+Violence, gore, drugs and frightening content have **no local detector** — NudeNet covers nudity
+only. Those categories are populated by importing skip files, where humans have already graded them.
 
 ## Finding Your Plex Token
 
@@ -114,6 +174,7 @@ This ensures no inappropriate content is shown, even if the detector's boundarie
 - **Recent skip events** — Log of the last 50 skips with timestamp, title, user, and client
 
 #### Library
+- **Import skip files** — Upload `.skp` / `.edl` / `.mcf`, paste a timestamp list, or export segments as EDL/MCF
 - **Browse all titles** with scan status icons
 - **Trigger scans** per title or entire library
 - **"Scan Now"** to prioritize a title — moves it to the front of the scanning queue for immediate processing
@@ -131,13 +192,15 @@ This ensures no inappropriate content is shown, even if the detector's boundarie
 
 #### Users
 - **Toggle filtering per Plex account** — Turn skipping on/off for specific user accounts
+- **Category preferences** — Expand a user to set a 0–3 strictness level per content category, with an optional skip/mute override
 
 #### Settings
 - **Plex connection** — Server URL and authentication token
 - **Scanner tuning** — Frame extraction interval, confidence threshold, parallel workers
 - **Rating filter** — Only scan titles matching your selected content ratings (exact match, "Unrated" is explicit)
 - **Detector labels** — Checkboxes to select which nudity types trigger skips (e.g., "female genitalia", "male genitalia", "breast", "butt", "anus")
-- **Skip behavior** — Extra buffer to add after segments, scan window, segment merge gap, minimum hits per segment
+- **Skip behavior** — Pre/post buffers around segments, scan window, segment merge gap, minimum hits per segment
+- **Profanity wordlist** — Words the subtitle scanner mutes
 
 ## Client Compatibility
 

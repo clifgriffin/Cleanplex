@@ -194,3 +194,28 @@ async def test_export_unknown_guid_returns_404(http_client):
     resp = await http_client.get("/api/segments/export/nope?fmt=edl")
 
     assert resp.status_code == 404
+
+
+# ── Segment API exposes classification ────────────────────────────────────────
+
+async def test_title_segments_expose_classification(http_client):
+    await _make_job()
+    await http_client.post("/api/segments/import", **_upload(SKP_BODY, "movie.skp"))
+
+    segs = (await http_client.get("/api/titles/guid-import/segments")).json()["segments"]
+    by_category = {s["category"]: s for s in segs}
+
+    assert by_category["language"]["action"] == "mute"
+    assert by_category["language"]["source"] == "skp"
+    assert by_category["nudity"]["severity"] == "medium"
+
+
+async def test_scanner_segments_report_scanner_defaults(http_client):
+    await _make_job()
+    await db.insert_segment("guid-import", "Test Movie", 1000, 2000)
+
+    segs = (await http_client.get("/api/titles/guid-import/segments")).json()["segments"]
+
+    assert segs[0]["category"] == "nudity"
+    assert segs[0]["source"] == "scanner"
+    assert segs[0]["action"] == "skip"

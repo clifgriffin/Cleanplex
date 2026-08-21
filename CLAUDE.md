@@ -27,6 +27,7 @@ Every change — regardless of size — must follow these rules. No exceptions.
 | Backend | Python 3.11+, FastAPI, aiosqlite | All I/O must be async |
 | Database | SQLite (WAL mode) | Single file at `~/.cleanplex/cleanplex.db` |
 | ML Inference | NudeNet (ONNX, local) | CPU-only; wrapped in `asyncio.to_thread` |
+| Content vocabulary | MovieContentFilter 1.1.0 | Category names, severities and channels; see `importers/_common.py` |
 | Video | FFmpeg / ffprobe | Subprocess via `frame_extractor.py` |
 | Plex API | `plexapi` + `httpx` | Wrapped in `PlexClient` |
 | Frontend | React, TypeScript, Vite, Tailwind | SPA served from `frontend/` |
@@ -38,6 +39,8 @@ Every change — regardless of size — must follow these rules. No exceptions.
 |---|---|
 | `database.py` | All SQL — no raw queries outside this file |
 | `scanner.py` | Frame extraction, NudeNet inference, segment writing |
+| `subtitle_scanner.py` | Subtitle parsing and profanity matching — emits muted language segments |
+| `importers/` | Skip file parsers and exporters (`.skp`, `.edl`, `.mcf`, pasted lists). One module per format; all return the same normalized segment dict |
 | `plex_client.py` | All Plex API calls — no `plexapi` imports elsewhere |
 | `filter_engine.py` | Playback position checks and seek decisions |
 | `watcher.py` | Polling loops only — no business logic |
@@ -233,20 +236,29 @@ These rules are invariants. Breaking them requires an explicit discussion issue 
 - **Retry logic must have a ceiling.** Every retry loop must have a max-attempt count and exponential backoff or fixed cap.
 - **No Plex API calls in loops without caching.** Calls like `get_episode_show_art` must be memoized within the request at minimum.
 
-### 5.4 Scanner
+### 5.4 Content Classification
+
+- **Categories come from the MovieContentFilter 1.1.0 vocabulary.** Never invent a category name; map onto an existing group or use `other`.
+- **Every segment carries `category`, `severity`, `action`, `channel` and `source`.** Importers set them from the file; the scanner uses its defaults.
+- **Only `skip` and `mute` are executable.** Plex exposes playback position and volume, nothing else. `blank` and `blur` must be logged and ignored, never downgraded to a skip.
+- **Filtering is a threshold, not a boolean**: a segment fires when the user's category level plus its severity rank exceeds 3.
+- **A new parser goes in `importers/`** and must return normalized segment dicts through `validate_segment`. Never let a parser write to the database itself.
+- **Never redistribute third-party segment data.** Parse what a user supplies; do not bundle or mirror another project's catalogue.
+
+### 5.5 Scanner
 
 - **One NudeNet detector per thread.** Use `threading.local()` — never instantiate inside a tight frame loop.
 - **Scanner global state (`_queued_guids`, `_current_scan_guids`, `_paused`) is guarded by a lock** before mutation.
 - **Segments are clustered before DB insert.** Never insert a raw frame-level row; always cluster via `_cluster_frames` / `_flush_cluster`.
 
-### 5.5 Frontend
+### 5.6 Frontend
 
 - **All API calls go through `src/api/`.** No `fetch`/`axios` calls inline in components or pages.
 - **Polling intervals must cancel in-flight requests.** Use `AbortController` before each new poll tick.
 - **No polling loop may run unbounded.** Every `setInterval`/recursive `setTimeout` must have a terminal condition (success, error, or max-duration).
 - **Bulk actions must use bounded concurrency or a batch endpoint.** Never fire N sequential requests from a UI loop.
 
-### 5.6 Sync
+### 5.7 Sync
 
 - **Sync is always manually triggered.** No background task or watcher may initiate a sync operation automatically.
 - **File hash cache is keyed by `(path, size, mtime)`.** Recompute SHA256 only when any of these change.

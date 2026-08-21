@@ -372,6 +372,15 @@ async def get_segments_batch(data: dict):
             "thumbnail_url": f"/api/thumbnails/{seg['id']}" if seg.get("thumbnail_path") else "",
             "created_at": seg["created_at"],
             "labels": labels,
+            # Classification, so the UI can show what a segment is and how it is
+            # handled. Imported segments rely on these entirely: their labels are
+            # free text from the source file rather than detector class names.
+            "category": seg.get("category") or "nudity",
+            "severity": seg.get("severity") or "high",
+            "action": seg.get("action") or "skip",
+            "channel": seg.get("channel") or "both",
+            "language": seg.get("language") or "",
+            "source": seg.get("source") or "scanner",
         })
     return Response(
         content=json.dumps({"segments": result}),
@@ -415,6 +424,15 @@ async def get_segments_for_title(plex_guid: str):
             "thumbnail_url": f"/api/thumbnails/{seg['id']}" if seg.get("thumbnail_path") else "",
             "created_at": seg["created_at"],
             "labels": labels,
+            # Classification, so the UI can show what a segment is and how it is
+            # handled. Imported segments rely on these entirely: their labels are
+            # free text from the source file rather than detector class names.
+            "category": seg.get("category") or "nudity",
+            "severity": seg.get("severity") or "high",
+            "action": seg.get("action") or "skip",
+            "channel": seg.get("channel") or "both",
+            "language": seg.get("language") or "",
+            "source": seg.get("source") or "scanner",
         })
     return Response(
         content=json.dumps({"segments": result}),
