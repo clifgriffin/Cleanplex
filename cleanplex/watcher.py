@@ -43,7 +43,11 @@ async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
             await filter_engine.reap({s.session_key for s in sessions}, client)
 
             for session in sessions:
-                user_filter = await db.get_user_filter(session.user)
+                user_filter = None
+                for username in session.user_identities:
+                    user_filter = await db.get_user_filter(username)
+                    if user_filter is not None:
+                        break
                 # Default: filter enabled if no explicit record
                 if user_filter is None or user_filter["enabled"]:
                     await filter_engine.process(

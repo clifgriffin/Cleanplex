@@ -47,6 +47,15 @@ class ActiveSession:
     # ISO code of the audio track being played, empty when it cannot be determined.
     # Language-specific segments (profanity mutes) only apply to their own track.
     audio_language: str = ""
+    # Canonical Plex username used by settings. `user` remains the display name
+    # reported by the active session.
+    user_key: str = ""
+
+    @property
+    def user_identities(self) -> tuple[str, ...]:
+        """Return canonical then display identity, without duplicates."""
+        names = (self.user_key or self.user, self.user)
+        return tuple(dict.fromkeys(name for name in names if name))
 
 
 @dataclass
@@ -96,6 +105,7 @@ class PlexClient:
         # How each client last accepted a player command. Populated by
         # load_client_profiles() at startup and updated whenever one is learned.
         self._client_profiles: dict[str, dict] = {}
+        self._user_aliases: dict[str, str] | None = None
 
     def _get_server(self) -> PlexServer:
         if self._server is None:
@@ -104,6 +114,7 @@ class PlexClient:
 
     def invalidate(self) -> None:
         self._server = None
+        self._user_aliases = None
 
     # ── Connectivity ──────────────────────────────────────────────────────────
 
@@ -125,6 +136,30 @@ class PlexClient:
 
     # ── Sessions ──────────────────────────────────────────────────────────────
 
+    async def _get_user_aliases(self, srv: PlexServer) -> dict[str, str]:
+        """Map Plex session display names to the usernames used by settings."""
+        if self._user_aliases is not None:
+            return self._user_aliases
+
+        aliases: dict[str, str] = {}
+        try:
+            account = srv.myPlexAccount()
+            users = [account]
+            try:
+                users.extend(await asyncio.to_thread(account.users))
+            except Exception as exc:
+                logger.warning("Failed to resolve Plex home users: %s", exc)
+            for user in users:
+                canonical = getattr(user, "username", "") or getattr(user, "title", "")
+                for alias in (getattr(user, "username", ""), getattr(user, "title", "")):
+                    if alias:
+                        aliases[str(alias).strip().casefold()] = str(canonical).strip()
+        except Exception as exc:
+            logger.warning("Failed to resolve Plex session usernames: %s", exc)
+
+        self._user_aliases = aliases
+        return aliases
+
     async def get_active_sessions(self) -> list[ActiveSession]:
         try:
             srv = await asyncio.to_thread(self._get_server)
@@ -133,9 +168,13 @@ class PlexClient:
             logger.warning("Failed to fetch sessions: %s", exc)
             return []
 
+        user_aliases = await self._get_user_aliases(srv) if sessions else {}
         result = []
         for s in sessions:
             try:
+                session_user = s.usernames[0] if s.usernames else "Unknown"
+                canonical_user = user_aliases.get(session_user.strip().casefold(), session_user)
+
                 # Determine full title
                 if hasattr(s, "grandparentTitle") and s.grandparentTitle:
                     full_title = f"{s.grandparentTitle} – {s.parentTitle} – {s.title}"
@@ -188,7 +227,7 @@ class PlexClient:
                 result.append(
                     ActiveSession(
                         session_key=str(s.sessionKey),
-                        user=s.usernames[0] if s.usernames else "Unknown",
+                        user=session_user,
                         title=s.title,
                         full_title=full_title,
                         plex_guid=guid,
@@ -205,6 +244,7 @@ class PlexClient:
                         library_section_id=section_id,
                         volume=volume,
                         audio_language=audio_language,
+                        user_key=canonical_user,
                     )
                 )
             except Exception as exc:

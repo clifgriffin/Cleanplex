@@ -145,7 +145,11 @@ async def process(
         logger.info("No segments found for '%s' (guid=%s, rating_key=%s)", session.full_title, session.plex_guid, session.rating_key)
         return
 
-    prefs = await db.get_user_category_prefs(session.user)
+    prefs = {}
+    for username in session.user_identities:
+        prefs = await db.get_user_category_prefs(username)
+        if prefs:
+            break
 
     # Widen segment bounds so the action lands ahead of the flagged content and
     # does not re-trigger on its tail.

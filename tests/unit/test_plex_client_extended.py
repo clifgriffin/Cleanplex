@@ -74,9 +74,15 @@ async def test_get_active_sessions_returns_empty_on_exception():
     assert sessions == []
 
 
-async def test_get_active_sessions_calls_audio_streams_method():
+async def test_get_active_sessions_calls_plex_methods_and_canonicalizes_user():
     c = _make_client()
     srv = _mock_server()
+
+    account = MagicMock(username="owner", title="Owner")
+    account.users = MagicMock(return_value=[
+        MagicMock(username="chelseagriffin109", title="Chelsea Griffin"),
+    ])
+    srv.myPlexAccount = MagicMock(return_value=account)
 
     audio = MagicMock(languageCode="eng", selected=True)
     part = MagicMock(file="/movies/test.mkv")
@@ -98,7 +104,7 @@ async def test_get_active_sessions_calls_audio_streams_method():
         guids=[MagicMock(id="imdb://tt123")],
         librarySectionID="1",
         sessionKey="session-1",
-        usernames=["alice"],
+        usernames=["Chelsea Griffin"],
         ratingKey="123",
         type="movie",
         viewOffset=1000,
@@ -116,7 +122,12 @@ async def test_get_active_sessions_calls_audio_streams_method():
 
     part.audioStreams.assert_called_once_with()
     assert len(sessions) == 1
+    assert sessions[0].user == "Chelsea Griffin"
+    assert sessions[0].user_key == "chelseagriffin109"
+    assert sessions[0].user_identities == ("chelseagriffin109", "Chelsea Griffin")
     assert sessions[0].audio_language == "eng"
+    assert c._user_aliases["chelseagriffin109"] == "chelseagriffin109"
+    assert c._user_aliases["chelsea griffin"] == "chelseagriffin109"
 
 
 # ── seek ──────────────────────────────────────────────────────────────────────

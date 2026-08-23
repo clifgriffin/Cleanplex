@@ -24,6 +24,7 @@ def _active_session(
     is_controllable: bool = True,
     position_ms: int = 5000,
     thumb: str = "",
+    user_key: str = "",
 ) -> ActiveSession:
     return ActiveSession(
         session_key=session_key,
@@ -39,6 +40,7 @@ def _active_session(
         client_title="Plex Web",
         is_controllable=is_controllable,
         thumb=thumb,
+        user_key=user_key,
     )
 
 
@@ -82,6 +84,20 @@ async def test_get_sessions_filtering_disabled_when_filter_set(http_client):
     with patch("cleanplex.web.routes.sessions.plex_mod.get_client", return_value=mock_client):
         resp = await http_client.get("/api/sessions")
     result = resp.json()["sessions"]
+    assert result[0]["filtering_enabled"] is False
+
+
+async def test_get_sessions_matches_canonical_username_and_keeps_display_name(http_client):
+    await db.upsert_user_filter("chelseagriffin109", enabled=False)
+    sessions = [
+        _active_session(user="Chelsea Griffin", user_key="chelseagriffin109")
+    ]
+    mock_client = make_mock_plex_client(sessions=sessions)
+    with patch("cleanplex.web.routes.sessions.plex_mod.get_client", return_value=mock_client):
+        resp = await http_client.get("/api/sessions")
+
+    result = resp.json()["sessions"]
+    assert result[0]["user"] == "Chelsea Griffin"
     assert result[0]["filtering_enabled"] is False
 
 

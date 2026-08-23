@@ -22,7 +22,10 @@ async def get_sessions():
     all_filters = {f["plex_username"]: f for f in await db.get_all_user_filters()}
     result = []
     for s in sessions:
-        user_filter = all_filters.get(s.user)
+        user_filter = next(
+            (all_filters[name] for name in s.user_identities if name in all_filters),
+            None,
+        )
         filtering_enabled = user_filter is None or bool(user_filter["enabled"])
         result.append({
             "session_key": s.session_key,

@@ -19,6 +19,7 @@ def _session(
     position_ms: int = 0,
     is_controllable: bool = True,
     user: str = "alice",
+    user_key: str = "",
     client_identifier: str = "client-abc",
     client_address: str = "192.168.1.10",
     client_port: int = 32500,
@@ -27,6 +28,7 @@ def _session(
     return ActiveSession(
         session_key=session_key,
         user=user,
+        user_key=user_key,
         title="Movie",
         full_title="Movie",
         plex_guid=plex_guid,
@@ -71,6 +73,24 @@ def _mock_db(mock_db, segments, prefs=None):
     mock_db.get_user_category_prefs = AsyncMock(return_value=prefs or {})
     mock_db.record_skip_event = AsyncMock(return_value=1)
     return mock_db
+
+
+async def test_category_preferences_use_canonical_username_first():
+    session = _session(
+        position_ms=35000,
+        user="Chelsea Griffin",
+        user_key="chelseagriffin109",
+    )
+    client = _make_client()
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(
+            mock_db,
+            _segs(30000, 40000),
+            prefs={"nudity": {"level": 3, "action": ""}},
+        )
+        await fe.process(session, client)
+
+    mock_db.get_user_category_prefs.assert_awaited_once_with("chelseagriffin109")
 
 
 @pytest.fixture(autouse=True)
