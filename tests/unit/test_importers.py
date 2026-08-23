@@ -312,12 +312,15 @@ def test_parse_file_rejects_unknown_extension(tmp_path):
         importers.parse_file(path)
 
 
-def test_find_sidecar_prefers_skp_over_edl(tmp_path):
+def test_find_sidecar_prefers_skp_then_mcf_then_edl(tmp_path):
     (tmp_path / "movie.mkv").write_text("x", encoding="utf-8")
     (tmp_path / "movie.edl").write_text("10 20 0\n", encoding="utf-8")
+    (tmp_path / "movie.mcf").write_text("WEBVTT MovieContentFilter 1.1.0\n", encoding="utf-8")
     (tmp_path / "movie.skp").write_text("0:00:10 --> 0:00:20\nnudity 3\n", encoding="utf-8")
 
     assert importers.find_sidecar(tmp_path / "movie.mkv").suffix == ".skp"
+    (tmp_path / "movie.skp").unlink()
+    assert importers.find_sidecar(tmp_path / "movie.mkv").suffix == ".mcf"
 
 
 def test_find_sidecar_returns_none_when_absent(tmp_path):

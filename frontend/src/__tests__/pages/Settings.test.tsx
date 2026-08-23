@@ -88,6 +88,21 @@ describe('Settings', () => {
     })
   })
 
+  it('enables automatic scans by default and saves checkbox changes', async () => {
+    renderSettings()
+    const checkbox = await screen.findByRole('checkbox', { name: 'Automatically scan newly discovered titles' })
+    expect(checkbox).toBeChecked()
+
+    fireEvent.click(checkbox)
+    expect(checkbox).not.toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalledWith(
+      '/api/settings',
+      expect.objectContaining({ auto_scan_new_titles: 'false' }),
+    ))
+  })
+
   it('upload polling terminates after MAX_POLLS without timing out infinitely', async () => {
     // Simulate an upload job that stays 'running' indefinitely — the loop must stop
     let pollCount = 0

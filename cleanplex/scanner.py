@@ -17,6 +17,7 @@ import cleanplex.plex_client as plex_mod
 from .frame_extractor import extract_frames_batch, get_duration_ms
 from .logger import get_logger
 from . import database as db
+from . import importers
 
 if TYPE_CHECKING:
     pass
@@ -80,7 +81,7 @@ def is_scan_eligible(job: dict, excluded_library_ids: set[str], scan_ratings: se
 
 
 def get_queue_size() -> int:
-    return _scan_queue.qsize() + _force_scan_queue.qsize()
+    return len(_queued_normal) + len(_queued_force)
 
 
 def get_ordered_queue_guids() -> tuple[list[str], list[str]]:
@@ -123,6 +124,35 @@ def resume_scanner() -> None:
     global _paused
     _paused = False
     logger.info("Scanner resumed")
+
+
+async def import_sidecar(plex_guid: str, title: str, file_path: str) -> bool:
+    """Replace stored segments with a sidecar and return True when one is valid."""
+    sidecar = None
+    try:
+        sidecar = importers.find_sidecar(file_path)
+        if sidecar is None:
+            return False
+
+        logger.info(
+            "Found sidecar %s for '%s' — importing instead of ML scan",
+            sidecar.name,
+            title,
+        )
+        segments, source = importers.parse_file(sidecar)
+        await db.delete_segments_for_guid(plex_guid)
+        count = await db.insert_segments_bulk(plex_guid, title, segments, source)
+        await db.update_scan_job_status(plex_guid, "done", progress=1.0)
+        logger.info("Imported %d segment(s) for '%s' from %s", count, title, sidecar.name)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Could not import sidecar %s for '%s'; using normal scan handling: %s",
+            sidecar.name if sidecar else file_path,
+            title,
+            exc,
+        )
+        return False
 
 
 async def force_scan_job(plex_guid: str) -> None:
@@ -173,7 +203,7 @@ async def enqueue(plex_guid: str) -> None:
 
 
 async def enqueue_pending() -> None:
-    """Drain the normal queue and re-enqueue all pending jobs in priority order.
+    """Restore forced jobs, then rebuild the normal pending queue in priority order.
 
     Safe to call at any time (e.g. on startup or via the reorder-queue API).
     Already-scanning titles (in _current_guids) are not affected.
@@ -188,6 +218,16 @@ async def enqueue_pending() -> None:
     Ignored titles are excluded; they remain pending in the DB so they can
     be un-ignored later without a fresh Plex sync.
     """
+    jobs = await db.get_scan_jobs(status="pending")
+    for job in jobs:
+        if job.get("force_scan"):
+            await force_scan_job(job["plex_guid"])
+
+    auto_scan = (await db.get_setting("auto_scan_new_titles", "true")).strip().lower()
+    if auto_scan in {"0", "false", "no", "off"}:
+        logger.info("Automatic scanning is disabled; normal pending jobs were not queued")
+        return
+
     # Drain the normal queue and clear tracking set so we can re-enqueue in order.
     # Force-queue and _current_guids are intentionally left untouched.
     async with _state_lock:
@@ -203,8 +243,11 @@ async def enqueue_pending() -> None:
     excluded_library_ids = set(_json.loads(await db.get_setting("excluded_library_ids", "[]")))
     scan_ratings_set = set(_json.loads(await db.get_setting("scan_ratings", "[]")))
 
-    jobs = await db.get_scan_jobs(status="pending")
-    active = [j for j in jobs if is_scan_eligible(j, excluded_library_ids, scan_ratings_set)]
+    normal_jobs = [job for job in jobs if not job.get("force_scan")]
+    active = [
+        job for job in normal_jobs
+        if is_scan_eligible(job, excluded_library_ids, scan_ratings_set)
+    ]
 
     movies = [j for j in active if j.get("media_type") != "episode"]
     episodes = [j for j in active if j.get("media_type") == "episode"]
@@ -245,7 +288,7 @@ async def enqueue_pending() -> None:
             enqueued,
             len(movies),
             len(episodes),
-            len(jobs) - len(active),
+            len(normal_jobs) - len(active),
         )
 
 
@@ -442,6 +485,9 @@ async def scan_video(plex_guid: str, config) -> None:
     job = await db.get_scan_job_by_guid(plex_guid)
     if not job:
         logger.warning("No scan job found for guid %s", plex_guid)
+        return
+
+    if await import_sidecar(plex_guid, job["title"], job["file_path"]):
         return
 
     # force_scan overrides every gate below — the user explicitly requested this scan.
@@ -724,6 +770,10 @@ async def _scanner_worker_loop(worker_id: int, get_config_fn) -> None:
             except asyncio.QueueEmpty:
                 plex_guid = await asyncio.wait_for(_scan_queue.get(), timeout=30)
                 async with _state_lock:
+                    # Force promotion leaves a stale token in asyncio.Queue because
+                    # the queue has no item-removal API. Ignore that token here.
+                    if plex_guid not in _queued_normal:
+                        continue
                     _queued_normal.discard(plex_guid)
                     if plex_guid in _queued_normal_ordered:
                         _queued_normal_ordered.remove(plex_guid)

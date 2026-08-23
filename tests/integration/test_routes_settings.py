@@ -42,6 +42,15 @@ async def test_update_settings_writes_values(http_client):
     assert await db.get_setting("log_level") == "DEBUG"
 
 
+async def test_update_settings_writes_automatic_scan_setting(http_client):
+    resp = await http_client.put(
+        "/api/settings",
+        json={"auto_scan_new_titles": "false"},
+    )
+    assert resp.status_code == 200
+    assert await db.get_setting("auto_scan_new_titles") == "false"
+
+
 async def test_update_settings_ignores_none_fields(http_client):
     await db.set_setting("poll_interval", "5")
     with patch("cleanplex.web.routes.settings.scan_mod.request_scanner_restart", new=AsyncMock()):

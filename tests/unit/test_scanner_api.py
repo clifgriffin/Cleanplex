@@ -6,6 +6,9 @@ The NudeNet inference and frame extraction paths are not invoked here.
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 import pytest_asyncio
 
@@ -26,8 +29,11 @@ async def reset_scanner_state():
         scanner._force_scan_queue.get_nowait()
     scanner._queued_normal.clear()
     scanner._queued_force.clear()
+    scanner._queued_normal_ordered.clear()
+    scanner._queued_force_ordered.clear()
     scanner._current_guids.clear()
     scanner._skip_requested_guids.clear()
+    scanner._queue_wakeup_event.clear()
     scanner._paused = False
     yield
     # Drain again after test
@@ -37,8 +43,11 @@ async def reset_scanner_state():
         scanner._force_scan_queue.get_nowait()
     scanner._queued_normal.clear()
     scanner._queued_force.clear()
+    scanner._queued_normal_ordered.clear()
+    scanner._queued_force_ordered.clear()
     scanner._current_guids.clear()
     scanner._skip_requested_guids.clear()
+    scanner._queue_wakeup_event.clear()
     scanner._paused = False
 
 
@@ -89,6 +98,35 @@ async def test_force_scan_job_moves_from_normal_queue():
     # Should no longer be in normal queue set
     assert "fg3" not in scanner._queued_normal
     assert "fg3" in scanner._queued_force
+    assert scanner.get_queue_size() == 1
+
+
+async def test_force_promotion_stale_normal_token_is_not_scanned_twice():
+    await db.upsert_scan_job("fg4", "T", "/f.mkv", "1", "lib1", "L")
+    await scanner.enqueue("fg4")
+    await scanner.force_scan_job("fg4")
+    scan_started = asyncio.Event()
+    release_scan = asyncio.Event()
+
+    async def scan_once(*_args):
+        scan_started.set()
+        await release_scan.wait()
+
+    config = MagicMock()
+    config.is_scan_window.return_value = True
+    get_config = AsyncMock(return_value=config)
+    with patch.object(scanner, "scan_video", new=AsyncMock(side_effect=scan_once)) as scan:
+        workers = [
+            asyncio.create_task(scanner._scanner_worker_loop(i, get_config))
+            for i in (1, 2)
+        ]
+        await asyncio.wait_for(scan_started.wait(), timeout=1)
+        await asyncio.sleep(0.01)
+        assert scan.await_count == 1
+        release_scan.set()
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
 
 # ── Pause / resume ─────────────────────────────────────────────────────────────
@@ -223,3 +261,16 @@ async def test_enqueue_pending_ignored_titles_excluded():
 
     assert "normal" in queued
     assert "ignored" not in queued
+
+
+async def test_enqueue_pending_preserves_manual_queue_and_restores_forced_jobs_when_disabled():
+    await db.set_setting("auto_scan_new_titles", "false")
+    await db.upsert_scan_job("pending", "Pending", "/p.mkv", "1", "lib", "L")
+    await scanner.enqueue("manual-normal")
+    await db.upsert_scan_job("forced", "Forced", "/f.mkv", "2", "lib", "L")
+    await db.set_force_scan("forced", True)
+
+    await scanner.enqueue_pending()
+
+    assert scanner.get_ordered_queue_guids() == (["forced"], ["manual-normal"])
+    assert "pending" not in scanner._queued_normal

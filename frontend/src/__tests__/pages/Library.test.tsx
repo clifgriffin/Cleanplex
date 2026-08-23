@@ -47,6 +47,7 @@ beforeEach(() => {
   mockApi.get.mockImplementation((path: string) => {
     if (path.includes('scanner-status')) return Promise.resolve(scannerIdle)
     if (path.includes('libraries') && !path.includes('titles')) return Promise.resolve({ libraries })
+    if (path.includes('/segments')) return Promise.resolve({ segments: [] })
     if (path.includes('titles')) return Promise.resolve({ titles })
     return Promise.resolve({})
   })
@@ -125,6 +126,60 @@ describe('Library', () => {
       expect(screen.getByText('Movie A')).toBeInTheDocument()
       expect(screen.getByText('Movie B')).toBeInTheDocument()
     })
+  })
+
+  it('opens the import panel for a movie with no segments', async () => {
+    renderLibrary()
+    await waitFor(() => screen.getAllByText('Movies')[0])
+    await act(async () => {
+      fireEvent.change(screen.getByRole('combobox'), { target: { value: 'lib1' } })
+    })
+    await waitFor(() => screen.getByText('Movie B'))
+
+    const segmentsButton = screen.getByRole('button', { name: 'Segments 0' })
+    expect(segmentsButton).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(segmentsButton)
+
+    expect(await screen.findByRole('button', { name: /skip file/i })).toBeInTheDocument()
+    expect(segmentsButton).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('No segments found')).toBeInTheDocument()
+  })
+
+  it('opens the import panel for a TV episode with no segments', async () => {
+    const tvLibraries = [{ id: 'lib2', title: 'TV Shows', type: 'show' }]
+    const episodes = [{
+      ...titles[1],
+      plex_guid: 'episode-1',
+      rating_key: '3',
+      title: 'Show A – Season 1 – Episode 1',
+      media_type: 'episode',
+      show_guid: 'show-1',
+      show_title: 'Show A',
+    }]
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes('scanner-status')) return Promise.resolve(scannerIdle)
+      if (path.includes('libraries') && !path.includes('titles')) return Promise.resolve({ libraries: tvLibraries })
+      if (path.includes('/segments')) return Promise.resolve({ segments: [] })
+      if (path.includes('titles')) return Promise.resolve({ titles: episodes })
+      return Promise.resolve({})
+    })
+
+    renderLibrary()
+    await waitFor(() => screen.getAllByText('TV Shows')[0])
+    await act(async () => {
+      fireEvent.change(screen.getByRole('combobox'), { target: { value: 'lib2' } })
+    })
+    await waitFor(() => screen.getByText('Show A'))
+
+    fireEvent.click(screen.getByTitle('Expand show'))
+    fireEvent.click(screen.getByRole('button', { name: /Season 1/ }))
+    const segmentsButton = screen.getByRole('button', { name: 'Segments 0' })
+    expect(segmentsButton).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(segmentsButton)
+
+    expect(await screen.findByRole('button', { name: /skip file/i })).toBeInTheDocument()
+    expect(segmentsButton).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('No segments found')).toBeInTheDocument()
   })
 
   it('scan selected button fires requests with bounded concurrency', async () => {

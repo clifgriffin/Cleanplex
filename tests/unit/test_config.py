@@ -21,6 +21,7 @@ async def test_config_load_returns_defaults():
     assert config.confidence_threshold == pytest.approx(0.6)
     assert config.skip_buffer_ms == 3000
     assert config.scan_workers == 2
+    assert config.auto_scan_new_titles is True
     assert config.log_level == "INFO"
 
 
@@ -55,6 +56,12 @@ async def test_config_scan_workers_minimum_one():
     await db.set_setting("scan_workers", "0")
     config = await Config.load()
     assert config.scan_workers == 1
+
+
+async def test_config_load_disables_automatic_scanning():
+    await db.set_setting("auto_scan_new_titles", "false")
+    config = await Config.load()
+    assert config.auto_scan_new_titles is False
 
 
 # ── is_configured ──────────────────────────────────────────────────────────────

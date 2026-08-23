@@ -202,6 +202,7 @@ DEFAULT_SETTINGS = {
     "post_buffer_ms": "3000",
     "scan_step_ms": "5000",
     "scan_workers": "2",
+    "auto_scan_new_titles": "true",
     "segment_gap_ms": "12000",
     "segment_min_hits": "1",
     "scan_window_start": "23:00",

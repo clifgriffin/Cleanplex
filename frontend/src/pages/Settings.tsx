@@ -10,6 +10,7 @@ interface Settings {
   skip_buffer_ms: string
   scan_step_ms: string
   scan_workers: string
+  auto_scan_new_titles: string
   nudenet_model: string
   nudenet_model_path: string
   segment_gap_ms: string
@@ -46,6 +47,7 @@ const DEFAULT: Settings = {
   skip_buffer_ms: '3000',
   scan_step_ms: '5000',
   scan_workers: '2',
+  auto_scan_new_titles: 'true',
   nudenet_model: '320n',
   nudenet_model_path: '',
   segment_gap_ms: '12000',
@@ -348,6 +350,20 @@ export default function SettingsPage() {
           <Field label="Scanner Workers" hint="How many titles can be scanned in parallel. Higher values use more CPU, disk, and memory.">
             <input type="number" min="1" max="12" step="1" value={form.scan_workers} onChange={set('scan_workers')} className={inputCls} />
           </Field>
+          <div>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.auto_scan_new_titles === 'true'}
+                onChange={e => setForm(f => ({ ...f, auto_scan_new_titles: String(e.target.checked) }))}
+                className="w-4 h-4 accent-plex-orange"
+              />
+              <span className="text-sm font-medium text-gray-300">Automatically scan newly discovered titles</span>
+            </label>
+            <p className="text-xs text-gray-600 mt-1">
+              When you turn off this setting, Cleanplex finds new Plex titles but does not add them to the ML scan queue. Sidecar imports and Scan Now still work.
+            </p>
+          </div>
           <Field label="NudeNet Model" hint="320n is bundled and fastest. 640m is downloaded by Cleanplex automatically and then cached locally.">
             <select value={form.nudenet_model} onChange={set('nudenet_model')} className={inputCls}>
               <option value="320n">320n (default, fast)</option>

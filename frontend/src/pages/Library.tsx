@@ -326,6 +326,9 @@ export default function Library() {
         <SkipFileImport
           plexGuid={guid}
           onImported={() => {
+            if (selected) {
+              void loadTitles(selected.id).then(setTitles).catch(() => {})
+            }
             // Drop the cached list so the next expand refetches what was imported.
             setLoadedSegments(prev => {
               const next = { ...prev }
@@ -1064,16 +1067,15 @@ export default function Library() {
                                                 )}
                                               </div>
                                               <div className="flex flex-wrap items-center gap-1 mt-1.5">
-                                                {title.segment_count > 0 && (
-                                                  <button
-                                                    onClick={() => toggleSegments(title.plex_guid)}
-                                                    title="Toggle segments"
-                                                    className="flex items-center gap-1 px-1.5 py-1 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded hover:bg-red-500/20 transition-colors"
-                                                  >
-                                                    {expandedSegments.has(title.plex_guid) ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                                                    {title.segment_count}
-                                                  </button>
-                                                )}
+                                                <button
+                                                  onClick={() => toggleSegments(title.plex_guid)}
+                                                  title="Toggle segments"
+                                                  aria-expanded={expandedSegments.has(title.plex_guid)}
+                                                  className="flex items-center gap-1 px-1.5 py-1 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded hover:bg-red-500/20 transition-colors"
+                                                >
+                                                  {expandedSegments.has(title.plex_guid) ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                                                  Segments {title.segment_count}
+                                                </button>
                                                 {title.segment_count > 0 && (
                                                   <button
                                                     onClick={() => deleteAllTitleSegs(title.plex_guid)}
@@ -1181,16 +1183,15 @@ export default function Library() {
                           )}
                         </div>
                         <div className="flex flex-wrap items-center gap-1 mt-2">
-                          {title.segment_count > 0 && (
-                            <button
-                              onClick={() => toggleSegments(title.plex_guid)}
-                              title="Toggle segments"
-                              className="flex items-center gap-1 px-1.5 py-1 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded hover:bg-red-500/20 transition-colors"
-                            >
-                              {expandedSegments.has(title.plex_guid) ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                              {title.segment_count}
-                            </button>
-                          )}
+                          <button
+                            onClick={() => toggleSegments(title.plex_guid)}
+                            title="Toggle segments"
+                            aria-expanded={expandedSegments.has(title.plex_guid)}
+                            className="flex items-center gap-1 px-1.5 py-1 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded hover:bg-red-500/20 transition-colors"
+                          >
+                            {expandedSegments.has(title.plex_guid) ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                            Segments {title.segment_count}
+                          </button>
                           {title.segment_count > 0 && (
                             <button
                               onClick={() => deleteAllTitleSegs(title.plex_guid)}

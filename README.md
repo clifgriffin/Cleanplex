@@ -90,6 +90,7 @@ All configuration is done via the **web UI** at `http://your-server:7979/setting
 | Skip Event Retention | 90 days | How long skip history is kept before being pruned at startup |
 | Scan Window | 23:00–06:00 | Time window when background scanning runs |
 | Scanner Workers | 2 | Number of parallel scans (higher = more CPU/memory usage) |
+| Automatically scan newly discovered titles | On | When off, Cleanplex adds new titles to the Library but does not queue an ML scan. Sidecar and manual scans still work. |
 | Detector Labels | — | Select which nudity types to detect (and skip). Only selected labels trigger skips |
 | Content Ratings | — | Only scan and filter titles matching your selected ratings |
 
@@ -136,8 +137,9 @@ ML-scanned**, so this is by far the cheapest way to fill your library.
 
 Two ways in:
 
-- **Sidecar** — drop `movie.skp` (or `.edl` / `.mcf`) next to `movie.mkv`. It is imported when the
-  title is first discovered and the scan is skipped entirely.
+- **Sidecar** — drop `movie.skp` (or `.mcf` / `.edl`) next to `movie.mkv`. Cleanplex checks it when
+  the title is first discovered and before a requested scan. A sidecar replaces old segments and
+  skips the ML scan. If more than one sidecar exists, Cleanplex uses `.skp`, then `.mcf`, then `.edl`.
 - **Library page** — expand a title and use the import box to upload a file or paste a list.
 
 Imported timings are authored against a specific cut of a film. Cleanplex checks them against the
@@ -197,6 +199,7 @@ only. Those categories are populated by importing skip files, where humans have 
 #### Settings
 - **Plex connection** — Server URL and authentication token
 - **Scanner tuning** — Frame extraction interval, confidence threshold, parallel workers
+- **Automatic scanning** — Choose if new titles enter the background ML scan queue
 - **Rating filter** — Only scan titles matching your selected content ratings (exact match, "Unrated" is explicit)
 - **Detector labels** — Checkboxes to select which nudity types trigger skips (e.g., "female genitalia", "male genitalia", "breast", "butt", "anus")
 - **Skip behavior** — Pre/post buffers around segments, scan window, segment merge gap, minimum hits per segment
