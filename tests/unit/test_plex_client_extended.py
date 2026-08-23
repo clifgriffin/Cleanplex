@@ -74,6 +74,51 @@ async def test_get_active_sessions_returns_empty_on_exception():
     assert sessions == []
 
 
+async def test_get_active_sessions_calls_audio_streams_method():
+    c = _make_client()
+    srv = _mock_server()
+
+    audio = MagicMock(languageCode="eng", selected=True)
+    part = MagicMock(file="/movies/test.mkv")
+    part.audioStreams = MagicMock(return_value=[audio])
+    media = MagicMock(parts=[part])
+    player = MagicMock(
+        machineIdentifier="client-id",
+        title="Plex Web",
+        state="playing",
+        address="192.168.1.2",
+        port=32500,
+        volume=75,
+    )
+    session = MagicMock(
+        grandparentTitle="",
+        title="Test Movie",
+        players=[player],
+        media=[media],
+        guids=[MagicMock(id="imdb://tt123")],
+        librarySectionID="1",
+        sessionKey="session-1",
+        usernames=["alice"],
+        ratingKey="123",
+        type="movie",
+        viewOffset=1000,
+        duration=10000,
+        thumb="",
+    )
+    srv.sessions = MagicMock(return_value=[session])
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    c._server = srv
+    with patch("cleanplex.plex_client.asyncio.to_thread", side_effect=fake_to_thread):
+        sessions = await c.get_active_sessions()
+
+    part.audioStreams.assert_called_once_with()
+    assert len(sessions) == 1
+    assert sessions[0].audio_language == "eng"
+
+
 # ── seek ──────────────────────────────────────────────────────────────────────
 
 async def test_seek_success_via_server_proxy():

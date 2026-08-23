@@ -168,7 +168,7 @@ class PlexClient:
                     file_path = part.file or ""
                     # The selected stream is what the viewer actually hears; fall
                     # back to the first audio stream when Plex marks none selected.
-                    streams = [st for st in (getattr(part, "audioStreams", None) or [])]
+                    streams = part.audioStreams()
                     selected = next((st for st in streams if getattr(st, "selected", False)), None)
                     chosen = selected or (streams[0] if streams else None)
                     if chosen is not None:
