@@ -99,7 +99,7 @@ All configuration is done via the **web UI** at `http://your-server:7979/setting
 **Default behavior:** When a segment is detected (e.g., 30s–60s), Cleanplex automatically:
 1. **Widens the segment** by the Pre and Post Buffer settings → 27s–63s at the 3000ms defaults
 2. **Monitors with a lookahead** of one poll interval — the filter triggers before the widened start to absorb polling latency
-3. **Skips to 27s** and holds the block until playback reaches 63s
+3. **Skips to 63s**, past the full segment and its buffers
 
 Polling tightens automatically as a stream approaches a segment, so skips land accurately without
 polling Plex hard the rest of the time. Every skip is verified on the next tick: a client that

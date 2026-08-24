@@ -143,7 +143,7 @@ async def test_guid_mismatch_falls_back_to_rating_key():
 # ── Buffers (issue #58) ────────────────────────────────────────────────────────
 
 async def test_pre_buffer_widens_segment_start():
-    """A 3000ms pre-buffer must move the trigger and target to 27000, not 25000.
+    """A 3000ms pre-buffer must move the trigger to 27000.
 
     Regression test for the hardcoded 5000ms expansion that ignored the setting.
     """
@@ -155,7 +155,7 @@ async def test_pre_buffer_widens_segment_start():
 
     client.seek.assert_awaited_once()
     _, seek_ms, *_ = client.seek.call_args[0]
-    assert seek_ms == 27000
+    assert seek_ms == 43000
 
 
 async def test_pre_buffer_is_honoured_when_changed():
@@ -166,7 +166,7 @@ async def test_pre_buffer_is_honoured_when_changed():
         await fe.process(session, client, pre_buffer_ms=8000, post_buffer_ms=1000, lookahead_ms=0)
 
     _, seek_ms, *_ = client.seek.call_args[0]
-    assert seek_ms == 22000
+    assert seek_ms == 41000
 
 
 async def test_post_buffer_bounds_the_trigger_window():
@@ -188,7 +188,7 @@ async def test_pre_buffer_clamps_at_zero():
         await fe.process(session, client, pre_buffer_ms=8000, post_buffer_ms=3000, lookahead_ms=0)
 
     _, seek_ms, *_ = client.seek.call_args[0]
-    assert seek_ms == 0
+    assert seek_ms == 8000
 
 
 # ── Lookahead trigger ──────────────────────────────────────────────────────────
@@ -204,7 +204,7 @@ async def test_position_within_lookahead_triggers_seek():
 
     client.seek.assert_awaited_once()
     _, seek_ms, *_ = client.seek.call_args[0]
-    assert seek_ms == 27000
+    assert seek_ms == 43000
 
 
 async def test_position_before_lookahead_does_not_seek():

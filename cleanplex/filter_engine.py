@@ -232,7 +232,7 @@ async def verify_pending_seek(session: ActiveSession, client: PlexClient) -> Non
 
 async def _apply_skip(session: ActiveSession, client: PlexClient, seg: dict, pos: int) -> None:
     """Seek past the segment and record the outcome."""
-    target = seg["start_ms"]
+    target = seg["end_ms"]
     logger.info(
         "Skipping [%s] for user '%s': %dms → %dms (segment: %d–%d, category=%s, confidence=%.2f)",
         session.full_title,

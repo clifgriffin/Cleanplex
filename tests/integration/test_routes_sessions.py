@@ -217,4 +217,4 @@ async def test_skip_session_seeks_to_next_segment(http_client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True
-    assert data["seek_to_ms"] == 25000  # 30000 - 5000 (expansion)
+    assert data["seek_to_ms"] == 65000  # 60000 + 5000 (expansion)
