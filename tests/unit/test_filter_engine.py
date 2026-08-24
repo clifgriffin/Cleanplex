@@ -239,16 +239,29 @@ async def test_position_past_segment_does_not_seek():
 
 # ── Recently skipped guard ─────────────────────────────────────────────────────
 
-async def test_recently_skipped_prevents_re_trigger():
-    session = _session(position_ms=35000)
+async def test_recently_skipped_prevents_retrigger_near_seek_target():
+    session = _session(position_ms=49000)
     client = _make_client()
     fe._recently_skipped["sess-1"] = 50000
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 47000))
+        await fe.process(session, client)
+
+    client.seek.assert_not_called()
+    mock_db.get_segments_for_guid.assert_not_awaited()
+
+
+async def test_rewind_after_skip_filters_same_segment_again():
+    session = _session(position_ms=35000)
+    client = _make_client()
+    fe._recently_skipped["sess-1"] = 43000
 
     with patch("cleanplex.filter_engine.db") as mock_db:
         _mock_db(mock_db, _segs(30000, 40000))
         await fe.process(session, client)
 
-    client.seek.assert_not_called()
+    client.seek.assert_awaited_once_with("client-abc", 43000, "192.168.1.10", 32500)
 
 
 async def test_recently_skipped_cleared_when_past_end():

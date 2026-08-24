@@ -119,10 +119,13 @@ async def process(
     await verify_pending_seek(session, client)
     await _restore_expired_mute(session, client, pos)
 
-    # Don't re-trigger if we already handled this stretch recently
-    skip_until = _recently_skipped.get(session.session_key, 0)
-    if pos < skip_until:
-        return
+    # Plex can land just short of the seek target. Suppress that landing, but
+    # clear the guard when the viewer rewinds farther into the segment.
+    skip_until = _recently_skipped.get(session.session_key)
+    if skip_until is not None:
+        if skip_until - _VERIFY_TOLERANCE_MS <= pos <= skip_until:
+            return
+        del _recently_skipped[session.session_key]
 
     # Back off briefly if a previous seek command failed for this session/client.
     blocked_until = _seek_backoff_until.get(session.session_key, 0.0)
@@ -184,9 +187,6 @@ async def process(
             await _apply_skip(session, client, seg, pos)
         return
 
-    # Clean up stale entries for sessions no longer in range
-    if session.session_key in _recently_skipped and pos > _recently_skipped[session.session_key]:
-        del _recently_skipped[session.session_key]
     if session.session_key in _seek_backoff_until and time.time() > _seek_backoff_until[session.session_key]:
         del _seek_backoff_until[session.session_key]
 
