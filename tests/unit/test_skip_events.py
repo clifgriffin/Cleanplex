@@ -158,6 +158,17 @@ async def test_imminent_segment_tightens_the_poll():
     assert delay <= 2.0
 
 
+async def test_language_cues_do_not_use_the_scene_pre_buffer_for_polling():
+    """A word at 10s is not 'imminent' at 5s the way a padded nudity scene is."""
+    await db.insert_segment(
+        "guid-poll", "Movie", 10000, 10500, category="language", action="mute",
+    )
+
+    delay = await watcher._next_poll_delay([_Sess(position_ms=5000)], _Cfg())
+
+    assert delay > 4.0
+
+
 async def test_poll_delay_never_drops_below_the_floor():
     await db.insert_segment("guid-poll", "Movie", 10000, 12000)
 

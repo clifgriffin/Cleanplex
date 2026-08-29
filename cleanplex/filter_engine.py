@@ -37,6 +37,31 @@ _SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
 _SUPPORTED_ACTIONS = {"skip", "mute"}
 _logged_unsupported: set[str] = set()
 
+# NudeNet clusters frames and can miss the edges of a scene, so those segments
+# keep the configured pre/post buffers. Authored mute/language cues are already
+# timed to a single word; the same 3s pads would skip a line of dialogue.
+_WORD_PAD_MS = 300
+_WORD_LOOKAHEAD_MS = 1000
+
+
+def _is_word_cue(segment: dict) -> bool:
+    """Return True for a short audio cue rather than a detected visual scene."""
+    return (segment.get("action") or "skip") == "mute" or (segment.get("category") or "") == "language"
+
+
+def segment_pads(segment: dict, pre_buffer_ms: int, post_buffer_ms: int) -> tuple[int, int]:
+    """Return (pre, post) pads for this segment given the viewer's buffer settings."""
+    if _is_word_cue(segment):
+        return _WORD_PAD_MS, _WORD_PAD_MS
+    return pre_buffer_ms, post_buffer_ms
+
+
+def _lookahead_for(segment: dict, lookahead_ms: int) -> int:
+    """Word cues must not inherit the scene lookahead or a skip jumps several seconds early."""
+    if _is_word_cue(segment):
+        return min(lookahead_ms, _WORD_LOOKAHEAD_MS)
+    return lookahead_ms
+
 
 async def reap(active_session_keys: set[str], client: PlexClient | None = None) -> None:
     """Drop tracking state for sessions that are no longer playing.
@@ -155,16 +180,17 @@ async def process(
             break
 
     # Widen segment bounds so the action lands ahead of the flagged content and
-    # does not re-trigger on its tail.
+    # does not re-trigger on its tail. Word cues get a much smaller pad.
     for seg in segments:
-        seg["start_ms"] = max(0, seg["start_ms"] - pre_buffer_ms)
-        seg["end_ms"] = seg["end_ms"] + post_buffer_ms
+        pre, post = segment_pads(seg, pre_buffer_ms, post_buffer_ms)
+        seg["start_ms"] = max(0, seg["start_ms"] - pre)
+        seg["end_ms"] = seg["end_ms"] + post
 
     logger.info("Checking %d segment(s) for '%s' at pos=%dms (client=%s)", len(segments), session.full_title, pos, session.client_identifier)
     for seg in segments:
-        # Trigger when approaching the segment (within lookahead_ms before start) or already inside.
+        # Trigger when approaching the segment (within lookahead before start) or already inside.
         # This compensates for polling latency so the action fires before/at the segment start.
-        if not (seg["start_ms"] - lookahead_ms <= pos <= seg["end_ms"]):
+        if not (seg["start_ms"] - _lookahead_for(seg, lookahead_ms) <= pos <= seg["end_ms"]):
             continue
         if not _matches_language(seg, session.audio_language):
             continue
@@ -182,7 +208,7 @@ async def process(
             continue
 
         if action == "mute":
-            await _apply_mute(session, client, seg)
+            await _apply_mute(session, client, seg, pos)
         else:
             await _apply_skip(session, client, seg, pos)
         return
@@ -283,11 +309,26 @@ async def _apply_skip(session: ActiveSession, client: PlexClient, seg: dict, pos
     )
 
 
-async def _apply_mute(session: ActiveSession, client: PlexClient, seg: dict) -> None:
-    """Mute for the duration of the segment, remembering the level to restore."""
+async def _apply_mute(session: ActiveSession, client: PlexClient, seg: dict, pos: int) -> None:
+    """Mute for the duration of the segment, remembering the level to restore.
+
+    Mute is a software-volume change. Clients that never report a volume (Apple TV
+    is the usual case) accept setParameters?volume=0 with a 2xx and then ignore it,
+    so the word still plays. Skip in that case — and when the volume command itself
+    fails — rather than leaving the audio intact or blacking out all filtering.
+    """
     if session.session_key in _muted_sessions:
         return
-    restore_to = session.volume if session.volume is not None and session.volume > 0 else 100
+    if session.volume is None:
+        logger.info(
+            "Client %s (%s) does not report volume — skipping instead of muting",
+            session.client_identifier,
+            session.client_title,
+        )
+        await _apply_skip(session, client, seg, pos)
+        return
+
+    restore_to = session.volume if session.volume > 0 else 100
     logger.info(
         "Muting [%s] for user '%s' until %dms (category=%s)",
         session.full_title,
@@ -311,7 +352,6 @@ async def _apply_mute(session: ActiveSession, client: PlexClient, seg: dict) -> 
         }
         muted_ok = True
     else:
-        _seek_backoff_until[session.session_key] = time.time() + 20
         muted_ok = False
 
     await db.record_skip_event(
@@ -328,6 +368,13 @@ async def _apply_mute(session: ActiveSession, client: PlexClient, seg: dict) -> 
         success=muted_ok,
         latency_ms=int((time.monotonic() - started) * 1000),
     )
+    if not muted_ok:
+        logger.info(
+            "Mute failed on client %s (%s) — skipping instead",
+            session.client_identifier,
+            session.client_title,
+        )
+        await _apply_skip(session, client, seg, pos)
 
 
 async def _restore_expired_mute(session: ActiveSession, client: PlexClient, pos: int) -> None:

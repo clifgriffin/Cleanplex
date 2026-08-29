@@ -96,10 +96,12 @@ All configuration is done via the **web UI** at `http://your-server:7979/setting
 
 ## Segment Expansion & Skip Logic
 
-**Default behavior:** When a segment is detected (e.g., 30s–60s), Cleanplex automatically:
+**Default behavior:** When a **nudity** segment is detected (e.g., 30s–60s), Cleanplex automatically:
 1. **Widens the segment** by the Pre and Post Buffer settings → 27s–63s at the 3000ms defaults
 2. **Monitors with a lookahead** of one poll interval — the filter triggers before the widened start to absorb polling latency
 3. **Skips to 63s**, past the full segment and its buffers
+
+Profanity / mute cues keep their authored times plus a 300ms pad. The 3s scene buffers would turn a single word into a multi-second jump.
 
 Polling tightens automatically as a stream approaches a segment, so skips land accurately without
 polling Plex hard the rest of the time. Every skip is verified on the next tick: a client that
@@ -113,7 +115,7 @@ Segments carry a **category** (nudity, sex, violence, language, drugs, fear, com
 | Action | Behaviour |
 |---|---|
 | `skip` | Seeks past the segment |
-| `mute` | Drops the volume for the segment and restores it after — used for profanity |
+| `mute` | Drops the volume for the segment and restores it after — used for profanity. Clients with no software volume (Apple TV) skip instead |
 
 Each user gets a 0–3 level per category. A segment fires when *level + severity* exceeds 3, so
 level 3 filters everything in that category and level 0 filters nothing. Users with no saved
@@ -215,7 +217,7 @@ The seek command is sent via the Plex Player Control API and works with most mod
 | Plex for iOS / Android | ✅ Fully supported |
 | Plex HTPC | ✅ Fully supported |
 | Plex Media Player (desktop) | ✅ Fully supported |
-| Apple TV | ✅ Fully supported |
+| Apple TV | ✅ Seek supported. Mute is not — tvOS has no app volume, so those segments are skipped instead |
 | Roku | ⚠️ Limited support |
 | Some Smart TV apps | ⚠️ Limited support |
 

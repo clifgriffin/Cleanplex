@@ -92,11 +92,12 @@ async def _next_poll_delay(sessions, config) -> float:
             segments = await db.get_segments_for_guid(session.plex_guid)
             if not segments and session.rating_key:
                 segments = await db.get_segments_by_rating_key(session.rating_key)
-            upcoming = [
-                s["start_ms"] - config.pre_buffer_ms - session.position_ms
-                for s in segments
-                if s["start_ms"] - config.pre_buffer_ms > session.position_ms
-            ]
+            upcoming = []
+            for s in segments:
+                pre, _ = filter_engine.segment_pads(s, config.pre_buffer_ms, config.post_buffer_ms)
+                trigger_at = s["start_ms"] - pre
+                if trigger_at > session.position_ms:
+                    upcoming.append(trigger_at - session.position_ms)
             if upcoming:
                 delay = min(delay, max(MIN_POLL_INTERVAL_S, min(upcoming) / 1000.0))
         except Exception as exc:

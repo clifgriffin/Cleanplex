@@ -518,6 +518,82 @@ async def test_mute_is_recorded_as_a_mute_event():
     assert mock_db.record_skip_event.call_args.kwargs["action"] == "mute"
 
 
+async def test_mute_falls_back_to_skip_when_client_has_no_volume():
+    """Apple TV never reports a volume; setParameters?volume=0 is a no-op there."""
+    session = _session(position_ms=35000, volume=None)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000, action="mute", category="language"))
+        await fe.process(session, client, pre_buffer_ms=0, post_buffer_ms=0)
+
+    client.set_volume.assert_not_called()
+    client.seek.assert_awaited_once_with("client-abc", 40000, "192.168.1.10", 32500)
+
+
+async def test_language_mute_does_not_use_the_scene_pre_buffer():
+    """3s scene pads are for NudeNet slop. A word at 30s must not fire at 27s."""
+    session = _session(position_ms=27000, volume=None)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 30500, action="mute", category="language"))
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+
+    client.seek.assert_not_called()
+    client.set_volume.assert_not_called()
+
+
+async def test_language_mute_fallback_skip_lands_just_past_the_word():
+    session = _session(position_ms=30100, volume=None)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 30500, action="mute", category="language"))
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+
+    client.seek.assert_awaited_once()
+    _, seek_ms, *_ = client.seek.call_args[0]
+    assert seek_ms == 30800
+
+
+async def test_language_cue_does_not_inherit_the_scene_lookahead():
+    """A 5s scene lookahead would still jump several seconds before a 0.5s word."""
+    session = _session(position_ms=28000, volume=None)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 30500, action="mute", category="language"))
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=5000)
+
+    client.seek.assert_not_called()
+
+
+async def test_nudity_still_uses_the_configured_scene_buffers():
+    session = _session(position_ms=27000)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000, category="nudity", action="skip"))
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+
+    _, seek_ms, *_ = client.seek.call_args[0]
+    assert seek_ms == 43000
+
+
+async def test_mute_falls_back_to_skip_when_set_volume_fails():
+    session = _session(position_ms=35000, volume=70)
+    client = _make_client(volume_result=False)
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000, action="mute", category="language"))
+        await fe.process(session, client, pre_buffer_ms=0, post_buffer_ms=0)
+
+    client.seek.assert_awaited_once()
+    assert "sess-1" not in fe._seek_backoff_until
+    assert "sess-1" not in fe._muted_sessions
+
+
 # ── Seek verification (issue #72) ──────────────────────────────────────────────
 
 async def test_seek_that_did_not_move_is_recorded_as_a_failure():
