@@ -96,7 +96,10 @@ async def test_category_preferences_use_canonical_username_first():
 @pytest.fixture(autouse=True)
 def reset_filter_state():
     """Clear global filter state before each test to prevent cross-test bleed."""
-    states = (fe._recently_skipped, fe._seek_backoff_until, fe._muted_sessions, fe._pending_verification)
+    states = (
+        fe._recently_skipped, fe._seek_backoff_until, fe._muted_sessions,
+        fe._pending_verification, fe._handled_cues,
+    )
     for state in states:
         state.clear()
     yield
@@ -531,6 +534,14 @@ async def test_mute_falls_back_to_skip_when_client_has_no_volume():
     client.seek.assert_awaited_once_with("client-abc", 40000, "192.168.1.10", 32500)
 
 
+def test_approach_window_is_ten_seconds_before_the_padded_start():
+    word = {"start_ms": 30000, "end_ms": 30500, "action": "mute", "category": "language"}
+    # Padded start 29700; horizon begins at 19700.
+    assert fe.ms_until_approach(word, 10000, 3000, 3000) == 9700
+    assert fe.ms_until_approach(word, 19700, 3000, 3000) == 0
+    assert fe.ms_until_approach(word, 40000, 3000, 3000) is None
+
+
 async def test_language_mute_does_not_use_the_scene_pre_buffer():
     """3s scene pads are for NudeNet slop. A word at 30s must not fire at 27s."""
     session = _session(position_ms=27000, volume=None)
@@ -545,7 +556,8 @@ async def test_language_mute_does_not_use_the_scene_pre_buffer():
 
 
 async def test_language_mute_fallback_skip_lands_just_past_the_word():
-    session = _session(position_ms=30100, volume=None)
+    # Still approaching the authored word (30.0s); 29.8s is inside the 300ms pad.
+    session = _session(position_ms=29800, volume=None)
     client = _make_client()
 
     with patch("cleanplex.filter_engine.db") as mock_db:
@@ -579,6 +591,81 @@ async def test_nudity_still_uses_the_configured_scene_buffers():
 
     _, seek_ms, *_ = client.seek.call_args[0]
     assert seek_ms == 43000
+
+
+async def test_skip_does_not_rewind_when_already_at_the_word_end():
+    """Landing on the padded end must not send seekTo(end) and pull playback back."""
+    session = _session(position_ms=30800, volume=None)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 30500, id=60, action="mute", category="language"))
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+
+    client.seek.assert_not_called()
+
+
+async def test_word_already_playing_is_not_skipped():
+    """Seeking to the word's end after it has started yanks playback backward."""
+    session = _session(position_ms=30100, volume=None)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 30500, id=60, action="mute", category="language"))
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+
+    client.seek.assert_not_called()
+    assert "sess-1" not in fe._pending_verification
+
+
+async def test_late_seek_landing_does_not_skip_the_same_word_again():
+    """Apple TV can apply seekTo(end) after the playhead has already passed it."""
+    session = _session(position_ms=29800, volume=None)
+    client = _make_client()
+    segs = _segs(30000, 30500, id=60, action="mute", category="language")
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, segs)
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+
+    client.seek.assert_awaited_once()
+    client.seek.reset_mock()
+    fe._recently_skipped.clear()
+    session.position_ms = 30800
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, segs)
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+
+    client.seek.assert_not_called()
+
+
+async def test_rewind_before_a_handled_word_allows_another_skip():
+    session = _session(position_ms=29800, volume=None)
+    client = _make_client()
+    segs = _segs(30000, 30500, id=60, action="mute", category="language")
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, segs)
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+
+    client.seek.reset_mock()
+    fe._recently_skipped.clear()
+    session.position_ms = 20000
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 30500, id=60, action="mute", category="language"))
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+
+    # 20000 is before the 1s word lookahead, so this tick should not fire —
+    # but the handled mark must have been cleared so a later in-window tick can.
+    client.seek.assert_not_called()
+    session.position_ms = 29800
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 30500, id=60, action="mute", category="language"))
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+
+    client.seek.assert_awaited_once()
 
 
 async def test_mute_falls_back_to_skip_when_set_volume_fails():

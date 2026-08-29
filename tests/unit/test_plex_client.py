@@ -212,3 +212,57 @@ def test_get_client_raises_when_not_initialised():
             pm.get_client()
     finally:
         pm._client = original
+
+
+# ── timeline playhead ──────────────────────────────────────────────────────────
+
+_TIMELINE_XML = """<?xml version="1.0"?>
+<MediaContainer commandID="1">
+  <Timeline type="music" state="stopped" time="0" />
+  <Timeline type="video" state="playing" time="105200" duration="7200000" />
+</MediaContainer>
+"""
+
+
+def test_parse_timeline_position_reads_the_playing_video():
+    from cleanplex.plex_client import _parse_timeline_position
+
+    assert _parse_timeline_position(_TIMELINE_XML) == 105200
+
+
+def test_parse_timeline_position_rejects_empty_and_invalid():
+    from cleanplex.plex_client import _parse_timeline_position
+
+    assert _parse_timeline_position("") is None
+    assert _parse_timeline_position("<not><xml") is None
+    assert _parse_timeline_position("<MediaContainer/>") is None
+
+
+async def test_get_player_position_uses_learned_direct_transport():
+    from cleanplex.plex_client import PlexClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "timeline/poll" in str(request.url):
+            return httpx.Response(200, text=_TIMELINE_XML)
+        return httpx.Response(404)
+
+    c = PlexClient("http://plex:32400", "token")
+    c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    c._client_profiles["apple-tv"] = {"transport": "direct", "port": 32500, "variant": 0}
+
+    pos = await c.get_player_position("apple-tv", "192.168.1.20", 32500)
+
+    assert pos == 105200
+
+
+async def test_get_player_position_returns_none_when_the_player_has_no_video_timeline():
+    from cleanplex.plex_client import PlexClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<MediaContainer/>")
+
+    c = PlexClient("http://plex:32400", "token")
+    c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    c._client_profiles["apple-tv"] = {"transport": "direct", "port": 32500, "variant": 0}
+
+    assert await c.get_player_position("apple-tv", "192.168.1.20", 32500) is None

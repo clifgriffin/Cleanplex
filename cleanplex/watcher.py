@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections import deque
 from datetime import datetime
 
@@ -18,13 +19,17 @@ logger = get_logger(__name__)
 # lives in the skip_events table; this is just the hot cache.
 skip_events: deque[dict] = deque(maxlen=50)
 
-# Floor for adaptive polling, so a session sitting right before a segment cannot
-# drive the poll rate high enough to hammer the Plex API.
-MIN_POLL_INTERVAL_S = 1.0
+# Inside the 10s approach window we read the player's live playhead this often.
+# PMS viewOffset is several seconds stale; 100ms is enough to catch a 0.5s word
+# without a sustained flood. Alias kept so existing tests can import one name.
+TIGHT_POLL_INTERVAL_S = 0.1
+MIN_POLL_INTERVAL_S = TIGHT_POLL_INTERVAL_S
 
 
 async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
-    """Poll Plex sessions every `poll_interval` seconds and fire skips."""
+    """Poll Plex sessions and fire skips, tightening near a cue."""
+    sessions = []
+    last_full_fetch = 0.0
     while True:
         config = await get_config_fn()
 
@@ -32,15 +37,18 @@ async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
             await asyncio.sleep(10)
             continue
 
-        sessions = []
         try:
             client = get_client_fn()
-            sessions = await client.get_active_sessions()
-
-            # Drop tracking state for sessions that ended, restoring volume for any
-            # that stopped mid-mute. Plex reuses session keys, so stale entries
-            # would otherwise suppress skips for unrelated playback.
-            await filter_engine.reap({s.session_key for s in sessions}, client)
+            now = time.monotonic()
+            # Full session list from PMS stays on the configured interval (5s).
+            # Tight ticks only refresh the playhead on players that are near a cue.
+            if not sessions or (now - last_full_fetch) >= config.poll_interval:
+                sessions = await client.get_active_sessions()
+                last_full_fetch = now
+                # Drop tracking state for sessions that ended, restoring volume for
+                # any that stopped mid-mute. Plex reuses session keys, so stale
+                # entries would otherwise suppress skips for unrelated playback.
+                await filter_engine.reap({s.session_key for s in sessions}, client)
 
             for session in sessions:
                 user_filter = None
@@ -49,25 +57,36 @@ async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
                     if user_filter is not None:
                         break
                 # Default: filter enabled if no explicit record
-                if user_filter is None or user_filter["enabled"]:
-                    await filter_engine.process(
-                        session,
-                        client,
-                        config.pre_buffer_ms,
-                        config.post_buffer_ms,
-                        config.poll_interval * 1000,
-                    )
+                if user_filter is not None and not user_filter["enabled"]:
+                    continue
 
-                    # Log skip event if a skip just happened (detect by checking _recently_skipped)
-                    sk = filter_engine._recently_skipped.get(session.session_key, 0)
-                    if sk and sk > session.position_ms:
-                        skip_events.appendleft({
-                            "time": datetime.now().isoformat(timespec="seconds"),
-                            "user": session.user,
-                            "title": session.full_title,
-                            "position_ms": session.position_ms,
-                            "client": session.client_title,
-                        })
+                if await _session_in_tight_window(session, config):
+                    live_ms = await client.get_player_position(
+                        session.client_identifier,
+                        session.client_address,
+                        session.client_port,
+                    )
+                    if live_ms is not None:
+                        session.position_ms = live_ms
+
+                await filter_engine.process(
+                    session,
+                    client,
+                    config.pre_buffer_ms,
+                    config.post_buffer_ms,
+                    config.poll_interval * 1000,
+                )
+
+                # Only a seek we actually sent belongs on the live dashboard.
+                pending = filter_engine._pending_verification.get(session.session_key)
+                if pending and pending["target_ms"] > session.position_ms:
+                    skip_events.appendleft({
+                        "time": datetime.now().isoformat(timespec="seconds"),
+                        "user": session.user,
+                        "title": session.full_title,
+                        "position_ms": session.position_ms,
+                        "client": session.client_title,
+                    })
 
         except Exception as exc:
             logger.warning("Session watcher error: %s", exc)
@@ -76,34 +95,67 @@ async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
         await asyncio.sleep(await _next_poll_delay(sessions, config))
 
 
+def _post_buffer_ms(config) -> int:
+    return getattr(config, "post_buffer_ms", 3000)
+
+
+async def _segments_for_session(session) -> list[dict]:
+    segments = await db.get_segments_for_guid(session.plex_guid)
+    if not segments and session.rating_key:
+        segments = await db.get_segments_by_rating_key(session.rating_key)
+    return segments
+
+
+async def _ms_until_tight(session, config) -> int | None:
+    """Smallest ms until the tight-poll window, 0 if already in it, None if idle."""
+    if session.session_key in filter_engine._pending_verification:
+        return 0
+    try:
+        segments = await _segments_for_session(session)
+    except Exception as exc:
+        logger.debug("Could not load segments for poll delay %s: %s", session.session_key, exc)
+        return None
+    skip_until = filter_engine._recently_skipped.get(session.session_key)
+    best: int | None = None
+    post_ms = _post_buffer_ms(config)
+    for seg in segments:
+        _, post = filter_engine.segment_pads(seg, config.pre_buffer_ms, post_ms)
+        if skip_until is not None and seg["end_ms"] + post <= skip_until:
+            continue
+        remaining = filter_engine.ms_until_approach(
+            seg, session.position_ms, config.pre_buffer_ms, post_ms,
+        )
+        if remaining is None:
+            continue
+        best = remaining if best is None else min(best, remaining)
+    return best
+
+
+async def _session_in_tight_window(session, config) -> bool:
+    remaining = await _ms_until_tight(session, config)
+    return remaining == 0
+
+
 async def _next_poll_delay(sessions, config) -> float:
     """Return how long to sleep before the next session poll.
 
-    Polling tightens as a session approaches a segment and relaxes when every
-    session is far from one. A fixed interval forces a trade between Plex API load
-    and skip precision; this gives precision only where it is needed.
+    Stay at the configured interval (5s) until a cue is within 10s, then drop
+    to 100ms until that cue is handled or passed, then relax again.
     """
     delay = float(config.poll_interval)
     if not sessions:
         return delay
 
     for session in sessions:
-        try:
-            segments = await db.get_segments_for_guid(session.plex_guid)
-            if not segments and session.rating_key:
-                segments = await db.get_segments_by_rating_key(session.rating_key)
-            upcoming = []
-            for s in segments:
-                pre, _ = filter_engine.segment_pads(s, config.pre_buffer_ms, config.post_buffer_ms)
-                trigger_at = s["start_ms"] - pre
-                if trigger_at > session.position_ms:
-                    upcoming.append(trigger_at - session.position_ms)
-            if upcoming:
-                delay = min(delay, max(MIN_POLL_INTERVAL_S, min(upcoming) / 1000.0))
-        except Exception as exc:
-            logger.debug("Could not compute poll delay for %s: %s", session.session_key, exc)
+        remaining = await _ms_until_tight(session, config)
+        if remaining is None:
+            continue
+        if remaining == 0:
+            delay = min(delay, TIGHT_POLL_INTERVAL_S)
+        else:
+            delay = min(delay, max(TIGHT_POLL_INTERVAL_S, remaining / 1000.0))
 
-    return max(MIN_POLL_INTERVAL_S, delay)
+    return delay
 
 
 async def library_watcher_loop(get_config_fn, get_client_fn) -> None:

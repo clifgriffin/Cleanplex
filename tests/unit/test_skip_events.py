@@ -128,6 +128,7 @@ async def test_aggregates_on_empty_history_return_empty():
 class _Cfg:
     poll_interval: int = 5
     pre_buffer_ms: int = 3000
+    post_buffer_ms: int = 3000
 
 
 @dataclass
@@ -149,24 +150,45 @@ async def test_distant_segment_polls_at_the_full_interval():
 
 
 async def test_imminent_segment_tightens_the_poll():
-    # Segment starts at 10s; with a 3s buffer the trigger point is 7s away, and the
-    # session is at 5s — so under 2s remain.
+    # Segment starts at 10s; with a 3s buffer the trigger is at 7s. Position 5s
+    # is inside the 10s approach window, so we drop to 100ms.
     await db.insert_segment("guid-poll", "Movie", 10000, 12000)
 
     delay = await watcher._next_poll_delay([_Sess(position_ms=5000)], _Cfg())
 
-    assert delay <= 2.0
+    assert delay == watcher.TIGHT_POLL_INTERVAL_S
 
 
-async def test_language_cues_do_not_use_the_scene_pre_buffer_for_polling():
-    """A word at 10s is not 'imminent' at 5s the way a padded nudity scene is."""
+async def test_language_cue_twenty_seconds_away_stays_at_five_seconds():
+    await db.insert_segment(
+        "guid-poll", "Movie", 30000, 30500, category="language", action="mute",
+    )
+
+    delay = await watcher._next_poll_delay([_Sess(position_ms=0)], _Cfg())
+
+    assert delay == 5.0
+
+
+async def test_language_cue_within_ten_seconds_uses_tight_poll():
+    """A word 5s away must enter the 100ms player-poll window."""
     await db.insert_segment(
         "guid-poll", "Movie", 10000, 10500, category="language", action="mute",
     )
 
     delay = await watcher._next_poll_delay([_Sess(position_ms=5000)], _Cfg())
 
-    assert delay > 4.0
+    assert delay == watcher.TIGHT_POLL_INTERVAL_S
+
+
+async def test_twelve_seconds_before_a_cue_sleeps_until_the_horizon():
+    """Stay at 5s until 10s out; at 12s before trigger, sleep ~2s."""
+    # Nudity at 20s, 3s pre-buffer → trigger 17s. Horizon is 7s. Position 5s
+    # is 2s before the horizon.
+    await db.insert_segment("guid-poll", "Movie", 20000, 22000)
+
+    delay = await watcher._next_poll_delay([_Sess(position_ms=5000)], _Cfg())
+
+    assert 1.9 <= delay <= 2.1
 
 
 async def test_poll_delay_never_drops_below_the_floor():
@@ -174,7 +196,7 @@ async def test_poll_delay_never_drops_below_the_floor():
 
     delay = await watcher._next_poll_delay([_Sess(position_ms=6990)], _Cfg())
 
-    assert delay == watcher.MIN_POLL_INTERVAL_S
+    assert delay == watcher.TIGHT_POLL_INTERVAL_S
 
 
 async def test_passed_segments_do_not_tighten_the_poll():
@@ -189,4 +211,44 @@ async def test_the_nearest_session_across_several_wins():
 
     sessions = [_Sess(position_ms=0), _Sess(session_key="s2", plex_guid="guid-close", position_ms=5000)]
 
-    assert await watcher._next_poll_delay(sessions, _Cfg()) <= 2.0
+    assert await watcher._next_poll_delay(sessions, _Cfg()) == watcher.TIGHT_POLL_INTERVAL_S
+
+
+async def test_just_skipped_cue_does_not_keep_tight_poll():
+    await db.insert_segment(
+        "guid-poll", "Movie", 10000, 10500, category="language", action="mute",
+    )
+    from cleanplex import filter_engine as fe
+
+    fe._recently_skipped["s1"] = 10800
+    try:
+        delay = await watcher._next_poll_delay([_Sess(position_ms=10000)], _Cfg())
+    finally:
+        fe._recently_skipped.clear()
+
+    assert delay == 5.0
+
+
+async def test_session_in_tight_window_when_a_word_is_five_seconds_away():
+    await db.insert_segment(
+        "guid-poll", "Movie", 10000, 10500, category="language", action="mute",
+    )
+
+    assert await watcher._session_in_tight_window(_Sess(position_ms=5000), _Cfg()) is True
+    assert await watcher._session_in_tight_window(
+        _Sess(plex_guid="guid-none", position_ms=5000), _Cfg(),
+    ) is False
+
+
+async def test_pending_seek_keeps_tight_poll():
+    from cleanplex import filter_engine as fe
+
+    fe._pending_verification["s1"] = {
+        "target_ms": 1, "category": "", "latency_ms": 0,
+    }
+    try:
+        delay = await watcher._next_poll_delay([_Sess(position_ms=0)], _Cfg())
+    finally:
+        fe._pending_verification.clear()
+
+    assert delay == watcher.TIGHT_POLL_INTERVAL_S

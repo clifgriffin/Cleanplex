@@ -15,8 +15,8 @@ When videos are added to your Plex library, Cleanplex queues them for background
 ### 2. Real-time Playback Monitoring
 While someone watches, the service polls Plex every few seconds:
 - Checks if a filtered user's playback position enters a flagged segment
-- The monitor uses a **5-second lookahead** before each segment start to compensate for polling latency
-- When triggered, automatically sends a seek command to jump **past the entire segment** (including the 5-second buffers)
+- Polling stays at 5s until a cue is within 10s, then reads the player's live playhead every 100ms
+- When triggered, automatically sends a seek command to jump **past the entire segment** (including scene buffers)
 - This is just a database lookup — no ML at playback time
 
 ### 3. Web UI Dashboard
@@ -103,9 +103,13 @@ All configuration is done via the **web UI** at `http://your-server:7979/setting
 
 Profanity / mute cues keep their authored times plus a 300ms pad. The 3s scene buffers would turn a single word into a multi-second jump.
 
-Polling tightens automatically as a stream approaches a segment, so skips land accurately without
-polling Plex hard the rest of the time. Every skip is verified on the next tick: a client that
-accepts the command without actually moving is recorded as a failure and re-probed.
+Polling stays at the configured interval (5s) until a cue is within 10 seconds, then reads the
+**player's** live playhead every 100ms until that cue is skipped or passed, then relaxes again.
+PMS session position is too stale to catch a 0.5s word. A skip that would land at or behind the
+current playhead is not sent — that rewind-after-the-word is worse than hearing it once.
+
+Every skip is verified on the next tick: a client that accepts the command without actually
+moving is recorded as a failure and re-probed.
 
 ### Categories, severity and actions
 
@@ -217,7 +221,7 @@ The seek command is sent via the Plex Player Control API and works with most mod
 | Plex for iOS / Android | ✅ Fully supported |
 | Plex HTPC | ✅ Fully supported |
 | Plex Media Player (desktop) | ✅ Fully supported |
-| Apple TV | ✅ Seek supported. Mute is not — tvOS has no app volume, so those segments are skipped instead |
+| Apple TV | ✅ Seek supported. Mute is not — tvOS has no app volume, so those segments are skipped instead. Word skips poll the player every 100ms in the 10s before the cue so the seek can fire before the word, not after it. |
 | Roku | ⚠️ Limited support |
 | Some Smart TV apps | ⚠️ Limited support |
 

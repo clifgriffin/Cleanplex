@@ -6,9 +6,14 @@ import asyncio
 import json
 import re
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+# Timeline polls run in the 100ms approach window, so a hung Apple TV must not
+# block the watcher for the default 10s HTTP timeout.
+_TIMELINE_POLL_TIMEOUT_S = 0.5
 
 # TTL for per-show metadata cache; 10 minutes is long enough to cover a full
 # library-titles request without stale data causing visible issues.
@@ -21,6 +26,34 @@ from plexapi.exceptions import PlexApiException
 from .logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _parse_timeline_position(xml_text: str) -> int | None:
+    """Return the video playhead in ms from a /player/timeline/poll body."""
+    if not xml_text:
+        return None
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+    chosen = None
+    for el in root.iter():
+        if el.tag.split("}")[-1] != "Timeline":
+            continue
+        if (el.get("type") or "").lower() != "video":
+            continue
+        chosen = el
+        if (el.get("state") or "").lower() == "playing":
+            break
+    if chosen is None:
+        return None
+    raw = chosen.get("time")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -400,6 +433,87 @@ class PlexClient:
                     return True
 
         return False
+
+    async def _proxy_text(self, path: str, client_identifier: str) -> str | None:
+        """Relay a player GET through PMS and return the body, or None."""
+        try:
+            resp = await self._http.get(
+                f"{self.url}{path}",
+                headers={
+                    "X-Plex-Token": self.token,
+                    "X-Plex-Target-Client-Identifier": client_identifier,
+                },
+                timeout=_TIMELINE_POLL_TIMEOUT_S,
+            )
+            if resp.status_code < 300:
+                return resp.text
+        except Exception as exc:
+            logger.debug("Proxy timeline poll failed for %s: %s", client_identifier, exc)
+        return None
+
+    async def _direct_text(
+        self, path: str, client_identifier: str, address: str, port: int, variant: int
+    ) -> str | None:
+        """Send one direct player GET and return the body, or None."""
+        base = f"http://{address}:{port}{path}"
+        variants = self._direct_variants(base, client_identifier)
+        if variant >= len(variants):
+            return None
+        url, headers = variants[variant]
+        try:
+            resp = await self._http.get(url, headers=headers, timeout=_TIMELINE_POLL_TIMEOUT_S)
+            if resp.status_code < 300:
+                return resp.text
+        except Exception as exc:
+            logger.debug(
+                "Direct timeline poll failed for %s at %s:%d: %s",
+                client_identifier, address, port, exc,
+            )
+        return None
+
+    async def get_player_position(
+        self,
+        client_identifier: str,
+        client_address: str = "",
+        client_port: int = 32500,
+    ) -> int | None:
+        """Return the player's live playhead in ms, or None if it cannot be read.
+
+        PMS /status/sessions only refreshes viewOffset every several seconds.
+        Short word cues need the playhead from /player/timeline/poll instead.
+        """
+        path = f"/player/timeline/poll?wait=0&commandID={int(time.time() * 1000)}"
+        profile = self._client_profiles.get(client_identifier)
+
+        async def from_proxy() -> int | None:
+            return _parse_timeline_position(await self._proxy_text(path, client_identifier) or "")
+
+        async def from_direct(port: int, variant: int) -> int | None:
+            text = await self._direct_text(path, client_identifier, client_address, port, variant)
+            return _parse_timeline_position(text or "")
+
+        # Do not re-run the seek-transport search on every 100ms tick. Use the
+        # learned path, or one proxy + one direct guess, then give up.
+        if profile is not None:
+            if profile.get("transport") == "direct" and client_address:
+                return await from_direct(
+                    int(profile.get("port", client_port)),
+                    int(profile.get("variant", 0)),
+                )
+            if profile.get("transport") == "proxy":
+                pos = await from_proxy()
+                if pos is not None:
+                    return pos
+                if client_address:
+                    return await from_direct(int(client_port), 0)
+            return None
+
+        pos = await from_proxy()
+        if pos is not None:
+            return pos
+        if client_address:
+            return await from_direct(int(client_port), 0)
+        return None
 
     async def seek(self, client_identifier: str, offset_ms: int, client_address: str = "", client_port: int = 32500) -> bool:
         """Seek the given client to offset_ms. Returns True if a command was accepted."""
