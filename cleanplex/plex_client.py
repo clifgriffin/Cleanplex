@@ -484,6 +484,7 @@ class PlexClient:
         """
         path = f"/player/timeline/poll?wait=0&commandID={int(time.time() * 1000)}"
         profile = self._client_profiles.get(client_identifier)
+        port = int((profile or {}).get("port") or client_port or 32500)
 
         async def from_proxy() -> int | None:
             return _parse_timeline_position(await self._proxy_text(path, client_identifier) or "")
@@ -492,28 +493,47 @@ class PlexClient:
             text = await self._direct_text(path, client_identifier, client_address, port, variant)
             return _parse_timeline_position(text or "")
 
-        # Do not re-run the seek-transport search on every 50ms tick. Use the
-        # learned path, or one proxy + one direct guess, then give up.
-        if profile is not None:
-            if profile.get("transport") == "direct" and client_address:
-                return await from_direct(
-                    int(profile.get("port", client_port)),
-                    int(profile.get("variant", 0)),
-                )
-            if profile.get("transport") == "proxy":
-                pos = await from_proxy()
-                if pos is not None:
-                    return pos
-                if client_address:
-                    return await from_direct(int(client_port), 0)
+        async def learn_direct() -> int | None:
+            """Find a header set that returns a video time.
+
+            seekTo on tvOS can 2xx with a slim header set. timeline/poll on the
+            same client returns 400 unless X-Plex-Product / Client-Identifier
+            are present. Do not reuse the seek variant blindly.
+            """
+            if not client_address:
+                return None
+            n = len(self._direct_variants("http://x", client_identifier))
+            preferred = (profile or {}).get("timeline_variant")
+            order: list[int] = []
+            if preferred is not None:
+                order.append(int(preferred))
+            # Full-header variants are indices 2 and 3 in _direct_variants.
+            for variant in (2, 3, 0, 1):
+                if variant not in order and 0 <= variant < n:
+                    order.append(variant)
+            for variant in order:
+                pos = await from_direct(port, variant)
+                if pos is None:
+                    continue
+                remembered = {
+                    **(profile or {}),
+                    "transport": "direct",
+                    "port": port,
+                    "timeline_variant": variant,
+                }
+                if "variant" not in remembered:
+                    remembered["variant"] = variant
+                await self._remember_profile(client_identifier, remembered)
+                return pos
             return None
 
-        pos = await from_proxy()
-        if pos is not None:
-            return pos
+        # PMS 404s timeline/poll for Apple TV. Try the player first when we
+        # have its address; after the first success only that variant is used.
         if client_address:
-            return await from_direct(int(client_port), 0)
-        return None
+            pos = await learn_direct()
+            if pos is not None:
+                return pos
+        return await from_proxy()
 
     async def seek(self, client_identifier: str, offset_ms: int, client_address: str = "", client_port: int = 32500) -> bool:
         """Seek the given client to offset_ms. Returns True if a command was accepted."""

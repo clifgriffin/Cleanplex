@@ -255,6 +255,41 @@ async def test_get_player_position_uses_learned_direct_transport():
     assert pos == 105200
 
 
+async def test_get_player_position_retries_when_seek_headers_fail_on_timeline():
+    """tvOS seekTo can 2xx on slim headers that timeline/poll rejects with 400."""
+    from cleanplex.plex_client import PlexClient
+
+    seen: list[bool] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "timeline/poll" not in str(request.url):
+            return httpx.Response(404)
+        full = request.headers.get("X-Plex-Product") == "Cleanplex"
+        seen.append(full)
+        if full:
+            return httpx.Response(200, text=_TIMELINE_XML)
+        return httpx.Response(400, text="Error processing player command")
+
+    c = PlexClient("http://plex:32400", "token")
+    c._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    c._persist_profiles = AsyncMock()
+    # Seek learned variant 0 (slim headers). Reusing it for poll is a 400 on tvOS.
+    c._client_profiles["apple-tv"] = {
+        "transport": "direct", "port": 32500, "variant": 0, "timeline_variant": 0,
+    }
+
+    pos = await c.get_player_position("apple-tv", "192.168.1.20", 32500)
+
+    assert pos == 105200
+    assert c._client_profiles["apple-tv"]["timeline_variant"] in (2, 3)
+    assert seen[:2] == [False, True]
+
+    seen.clear()
+    pos = await c.get_player_position("apple-tv", "192.168.1.20", 32500)
+    assert pos == 105200
+    assert seen == [True]
+
+
 async def test_get_player_position_returns_none_when_the_player_has_no_video_timeline():
     from cleanplex.plex_client import PlexClient
 
