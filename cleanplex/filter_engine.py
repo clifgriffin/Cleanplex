@@ -42,15 +42,15 @@ _SUPPORTED_ACTIONS = {"skip", "mute"}
 _logged_unsupported: set[str] = set()
 
 # NudeNet clusters frames and can miss the edges of a scene, so those segments
-# keep the configured pre/post buffers. Authored mute/language cues are already
-# timed to a single word; the same 3s pads would skip a line of dialogue.
-_WORD_PAD_MS = 300
+# keep the configured pre/post buffers. Authored mute/language cues stay at the
+# times in the skip file — a pad is what turned a 0.5s word into a rewind.
+# Lookahead only decides when we send seekTo(end), not where we land.
 _WORD_LOOKAHEAD_MS = 1000
 # A 0.5s swear is a "word"; a 10s language mute is a span we can still jump mid-way.
 _SHORT_CUE_MS = 2000
-# Start the 100ms player poll this far before a cue. PMS viewOffset is too stale
-# for word skips; the watcher reads /player/timeline/poll inside this window.
-APPROACH_HORIZON_MS = 10_000
+# Start asking the player this far before a cue. PMS viewOffset can be a full
+# heartbeat behind; 20s gives the tvOS poll time to take over before the word.
+APPROACH_HORIZON_MS = 20_000
 
 
 def _is_word_cue(segment: dict) -> bool:
@@ -61,7 +61,7 @@ def _is_word_cue(segment: dict) -> bool:
 def segment_pads(segment: dict, pre_buffer_ms: int, post_buffer_ms: int) -> tuple[int, int]:
     """Return (pre, post) pads for this segment given the viewer's buffer settings."""
     if _is_word_cue(segment):
-        return _WORD_PAD_MS, _WORD_PAD_MS
+        return 0, 0
     return pre_buffer_ms, post_buffer_ms
 
 
@@ -80,7 +80,7 @@ def ms_until_approach(
 ) -> int | None:
     """Ms until this segment enters the tight-poll window, 0 if already in it.
 
-    None means playback is already past the padded end.
+    None means playback is already past the authored end.
     """
     pre, post = segment_pads(segment, pre_buffer_ms, post_buffer_ms)
     trigger_at = max(0, segment["start_ms"] - pre)
@@ -98,8 +98,8 @@ def _is_short_word_cue(segment: dict) -> bool:
     return _is_word_cue(segment) and (end - start) <= _SHORT_CUE_MS
 
 
-def _too_late_to_skip_word(segment: dict, pos: int) -> bool:
-    """True when the swear has already started — seeking to its end would rewind."""
+def _word_already_started(segment: dict, pos: int) -> bool:
+    """True when a short word cue has begun — a seek to its end would rewind."""
     if not _is_short_word_cue(segment):
         return False
     return pos >= segment.get("_original_start_ms", segment["start_ms"])
@@ -118,20 +118,22 @@ def _remember_cue(session_key: str, segment: dict) -> None:
     _handled_cues.setdefault(session_key, {})[_cue_key(segment)] = segment["end_ms"]
 
 
+def _forget_rewound_cues(session_key: str, pos: int) -> None:
+    """Drop handled marks the viewer has rewound past, even outside a cue window."""
+    bucket = _handled_cues.get(session_key)
+    if not bucket:
+        return
+    for key, end_ms in list(bucket.items()):
+        if pos < end_ms - _VERIFY_TOLERANCE_MS:
+            del bucket[key]
+
+
 def _already_handled(session_key: str, segment: dict, pos: int) -> bool:
     """Return True if we already acted on this cue and the viewer has not rewound."""
     bucket = _handled_cues.get(session_key)
     if not bucket:
         return False
-    key = _cue_key(segment)
-    end_ms = bucket.get(key)
-    if end_ms is None:
-        return False
-    # A real rewind lands well before the previous seek target.
-    if pos < end_ms - _VERIFY_TOLERANCE_MS:
-        del bucket[key]
-        return False
-    return True
+    return _cue_key(segment) in bucket
 
 
 async def reap(active_session_keys: set[str], client: PlexClient | None = None) -> None:
@@ -216,6 +218,7 @@ async def process(
     pos = session.position_ms
 
     await verify_pending_seek(session, client)
+    _forget_rewound_cues(session.session_key, pos)
     await _restore_expired_mute(session, client, pos)
 
     # Plex can land just short of the seek target. Suppress that landing, but
@@ -253,8 +256,8 @@ async def process(
         if prefs:
             break
 
-    # Widen segment bounds so the action lands ahead of the flagged content and
-    # does not re-trigger on its tail. Word cues get a much smaller pad.
+    # Widen scene bounds so the action lands ahead of the flagged content.
+    # Word cues keep their authored times.
     for seg in segments:
         if "_cue_key" not in seg:
             seg["_cue_key"] = _cue_key(seg)
@@ -312,6 +315,11 @@ async def verify_pending_seek(session: ActiveSession, client: PlexClient) -> Non
     if session.position_ms >= pending["target_ms"] - _VERIFY_TOLERANCE_MS:
         return
 
+    from_ms = pending.get("from_ms", pending["target_ms"])
+    # A live playhead that jumped backward is a rewind, not a failed seek.
+    if session.position_ms < from_ms - _VERIFY_TOLERANCE_MS:
+        return
+
     logger.warning(
         "Seek on client %s reported success but position is still %dms (expected >= %dms)",
         session.client_identifier, session.position_ms, pending["target_ms"],
@@ -340,11 +348,11 @@ async def verify_pending_seek(session: ActiveSession, client: PlexClient) -> Non
 async def _apply_skip(session: ActiveSession, client: PlexClient, seg: dict, pos: int) -> None:
     """Seek past the segment and record the outcome."""
     target = seg["end_ms"]
-    # A late seekTo(end) after the word has played rewinds. Skip the seek rather
-    # than yank playback backward; the 100ms approach poll exists so we fire earlier.
-    if target <= pos or _too_late_to_skip_word(seg, pos):
+    # A 0.4s remaining jump applies late on Apple TV and yanks backward. Only
+    # skip a short word while still approaching; land on the authored end.
+    if target <= pos or _word_already_started(seg, pos):
         logger.info(
-            "Too late to skip cleanly (target=%dms pos=%dms) — not seeking backward",
+            "Already at or past skip target %dms (pos=%dms) — not seeking backward",
             target, pos,
         )
         _remember_cue(session.session_key, seg)
@@ -378,6 +386,7 @@ async def _apply_skip(session: ActiveSession, client: PlexClient, seg: dict, pos
         # Checked on the next tick: a 2xx response is not proof playback moved.
         _pending_verification[session.session_key] = {
             "target_ms": target,
+            "from_ms": pos,
             "category": seg.get("category", ""),
             "segment_id": seg.get("id"),
             "latency_ms": latency_ms,

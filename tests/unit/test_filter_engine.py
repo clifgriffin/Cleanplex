@@ -534,17 +534,17 @@ async def test_mute_falls_back_to_skip_when_client_has_no_volume():
     client.seek.assert_awaited_once_with("client-abc", 40000, "192.168.1.10", 32500)
 
 
-def test_approach_window_is_ten_seconds_before_the_padded_start():
+def test_approach_window_is_twenty_seconds_before_the_authored_start():
     word = {"start_ms": 30000, "end_ms": 30500, "action": "mute", "category": "language"}
-    # Padded start 29700; horizon begins at 19700.
-    assert fe.ms_until_approach(word, 10000, 3000, 3000) == 9700
-    assert fe.ms_until_approach(word, 19700, 3000, 3000) == 0
+    # No pad. Horizon begins at 10000.
+    assert fe.ms_until_approach(word, 0, 3000, 3000) == 10000
+    assert fe.ms_until_approach(word, 10000, 3000, 3000) == 0
     assert fe.ms_until_approach(word, 40000, 3000, 3000) is None
 
 
 async def test_language_mute_does_not_use_the_scene_pre_buffer():
-    """3s scene pads are for NudeNet slop. A word at 30s must not fire at 27s."""
-    session = _session(position_ms=27000, volume=None)
+    """3s scene pads are for NudeNet slop. A word at 30s must not fire at 26s."""
+    session = _session(position_ms=26000, volume=None)
     client = _make_client()
 
     with patch("cleanplex.filter_engine.db") as mock_db:
@@ -555,18 +555,18 @@ async def test_language_mute_does_not_use_the_scene_pre_buffer():
     client.set_volume.assert_not_called()
 
 
-async def test_language_mute_fallback_skip_lands_just_past_the_word():
-    # Still approaching the authored word (30.0s); 29.8s is inside the 300ms pad.
-    session = _session(position_ms=29800, volume=None)
+async def test_language_mute_fallback_skip_lands_on_the_authored_end():
+    """1s lookahead fires the seek; the landing is still 30.5s, not a pad."""
+    session = _session(position_ms=29000, volume=None)
     client = _make_client()
 
     with patch("cleanplex.filter_engine.db") as mock_db:
         _mock_db(mock_db, _segs(30000, 30500, action="mute", category="language"))
-        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=1000)
 
     client.seek.assert_awaited_once()
     _, seek_ms, *_ = client.seek.call_args[0]
-    assert seek_ms == 30800
+    assert seek_ms == 30500
 
 
 async def test_language_cue_does_not_inherit_the_scene_lookahead():
@@ -594,8 +594,8 @@ async def test_nudity_still_uses_the_configured_scene_buffers():
 
 
 async def test_skip_does_not_rewind_when_already_at_the_word_end():
-    """Landing on the padded end must not send seekTo(end) and pull playback back."""
-    session = _session(position_ms=30800, volume=None)
+    """Landing on the authored end must not send seekTo(end) and pull playback back."""
+    session = _session(position_ms=30500, volume=None)
     client = _make_client()
 
     with patch("cleanplex.filter_engine.db") as mock_db:
@@ -606,7 +606,7 @@ async def test_skip_does_not_rewind_when_already_at_the_word_end():
 
 
 async def test_word_already_playing_is_not_skipped():
-    """Seeking to the word's end after it has started yanks playback backward."""
+    """A 400ms remaining jump applies late and yanks backward — let the word go."""
     session = _session(position_ms=30100, volume=None)
     client = _make_client()
 
@@ -620,34 +620,34 @@ async def test_word_already_playing_is_not_skipped():
 
 async def test_late_seek_landing_does_not_skip_the_same_word_again():
     """Apple TV can apply seekTo(end) after the playhead has already passed it."""
-    session = _session(position_ms=29800, volume=None)
+    session = _session(position_ms=29000, volume=None)
     client = _make_client()
     segs = _segs(30000, 30500, id=60, action="mute", category="language")
 
     with patch("cleanplex.filter_engine.db") as mock_db:
         _mock_db(mock_db, segs)
-        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=1000)
 
     client.seek.assert_awaited_once()
     client.seek.reset_mock()
     fe._recently_skipped.clear()
-    session.position_ms = 30800
+    session.position_ms = 30500
 
     with patch("cleanplex.filter_engine.db") as mock_db:
         _mock_db(mock_db, segs)
-        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=1000)
 
     client.seek.assert_not_called()
 
 
 async def test_rewind_before_a_handled_word_allows_another_skip():
-    session = _session(position_ms=29800, volume=None)
+    session = _session(position_ms=29000, volume=None)
     client = _make_client()
     segs = _segs(30000, 30500, id=60, action="mute", category="language")
 
     with patch("cleanplex.filter_engine.db") as mock_db:
         _mock_db(mock_db, segs)
-        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=1000)
 
     client.seek.reset_mock()
     fe._recently_skipped.clear()
@@ -655,17 +655,31 @@ async def test_rewind_before_a_handled_word_allows_another_skip():
 
     with patch("cleanplex.filter_engine.db") as mock_db:
         _mock_db(mock_db, _segs(30000, 30500, id=60, action="mute", category="language"))
-        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=1000)
 
     # 20000 is before the 1s word lookahead, so this tick should not fire —
     # but the handled mark must have been cleared so a later in-window tick can.
     client.seek.assert_not_called()
-    session.position_ms = 29800
+    session.position_ms = 29000
     with patch("cleanplex.filter_engine.db") as mock_db:
         _mock_db(mock_db, _segs(30000, 30500, id=60, action="mute", category="language"))
+        await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=1000)
+
+    client.seek.assert_awaited_once()
+
+
+async def test_long_language_mute_still_skips_the_remaining_span():
+    """A 10s language mute that we notice mid-way can still jump to the authored end."""
+    session = _session(position_ms=35000, volume=None)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, _segs(30000, 40000, action="mute", category="language"))
         await fe.process(session, client, pre_buffer_ms=3000, post_buffer_ms=3000, lookahead_ms=0)
 
     client.seek.assert_awaited_once()
+    _, seek_ms, *_ = client.seek.call_args[0]
+    assert seek_ms == 40000
 
 
 async def test_mute_falls_back_to_skip_when_set_volume_fails():
@@ -683,11 +697,27 @@ async def test_mute_falls_back_to_skip_when_set_volume_fails():
 
 # ── Seek verification (issue #72) ──────────────────────────────────────────────
 
+async def test_rewind_during_pending_seek_is_not_a_failed_seek():
+    """A live playhead that jumped backward is a rewind, not a dead transport."""
+    client = _make_client()
+    fe._pending_verification["sess-1"] = {
+        "target_ms": 30500, "from_ms": 29000, "category": "language", "segment_id": 60, "latency_ms": 5,
+    }
+    session = _session(position_ms=20000)
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(mock_db, [])
+        await fe.process(session, client)
+
+    client._forget_profile.assert_not_awaited()
+    mock_db.record_skip_event.assert_not_awaited()
+
+
 async def test_seek_that_did_not_move_is_recorded_as_a_failure():
     """A 2xx response is not proof: verify the position actually advanced."""
     client = _make_client()
     fe._pending_verification["sess-1"] = {
-        "target_ms": 30000, "category": "nudity", "segment_id": 7, "latency_ms": 12,
+        "target_ms": 30000, "from_ms": 10000, "category": "nudity", "segment_id": 7, "latency_ms": 12,
     }
     # Next tick, the client is still sitting where it was.
     session = _session(position_ms=10000)
@@ -704,7 +734,7 @@ async def test_seek_that_did_not_move_is_recorded_as_a_failure():
 async def test_failed_verification_invalidates_the_client_profile():
     client = _make_client()
     fe._pending_verification["sess-1"] = {
-        "target_ms": 30000, "category": "nudity", "segment_id": None, "latency_ms": 5,
+        "target_ms": 30000, "from_ms": 10000, "category": "nudity", "segment_id": None, "latency_ms": 5,
     }
     session = _session(position_ms=10000)
 
@@ -719,7 +749,7 @@ async def test_failed_verification_invalidates_the_client_profile():
 async def test_verified_seek_records_nothing_extra():
     client = _make_client()
     fe._pending_verification["sess-1"] = {
-        "target_ms": 30000, "category": "nudity", "segment_id": None, "latency_ms": 5,
+        "target_ms": 30000, "from_ms": 10000, "category": "nudity", "segment_id": None, "latency_ms": 5,
     }
     session = _session(position_ms=31000)
 
@@ -735,7 +765,7 @@ async def test_verification_tolerates_keyframe_snapping():
     """Landing slightly short of the target is normal, not a failure."""
     client = _make_client()
     fe._pending_verification["sess-1"] = {
-        "target_ms": 30000, "category": "nudity", "segment_id": None, "latency_ms": 5,
+        "target_ms": 30000, "from_ms": 10000, "category": "nudity", "segment_id": None, "latency_ms": 5,
     }
     session = _session(position_ms=29000)  # 1s short, inside tolerance
 

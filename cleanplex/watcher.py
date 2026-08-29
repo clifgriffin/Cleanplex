@@ -19,11 +19,76 @@ logger = get_logger(__name__)
 # lives in the skip_events table; this is just the hot cache.
 skip_events: deque[dict] = deque(maxlen=50)
 
-# Inside the 10s approach window we read the player's live playhead this often.
-# PMS viewOffset is several seconds stale; 100ms is enough to catch a 0.5s word
-# without a sustained flood. Alias kept so existing tests can import one name.
-TIGHT_POLL_INTERVAL_S = 0.1
+# Inside the approach window we tick this often and read /player/timeline/poll
+# on the client (tvOS included). Alias kept so existing tests can import one name.
+TIGHT_POLL_INTERVAL_S = 0.05
 MIN_POLL_INTERVAL_S = TIGHT_POLL_INTERVAL_S
+# Last real sample per session: {session_key: {"pos_ms", "at"}}
+_playhead: dict[str, dict] = {}
+# Sessions whose clock came from /player/timeline/poll rather than PMS viewOffset.
+_live_from_player: set[str] = set()
+
+
+def _mark_playhead(session_key: str, pos_ms: int, now: float) -> None:
+    _playhead[session_key] = {"pos_ms": pos_ms, "at": now}
+
+
+def _estimated_position(session, now: float) -> int:
+    """Advance the last real sample by wall time so a stale PMS offset cannot freeze."""
+    rec = _playhead.get(session.session_key)
+    if rec is None:
+        return session.position_ms
+    return rec["pos_ms"] + max(0, int((now - rec["at"]) * 1000))
+
+
+def _merge_pms_playhead(session, now: float) -> None:
+    """Keep a clock-running playhead. A stale lower viewOffset must not win.
+
+    PMS viewOffset can lag 5–10s. A drop is almost always a stale heartbeat, not
+    a rewind. The player timeline is what moves the clock backward.
+    """
+    pms = session.position_ms
+    rec = _playhead.get(session.session_key)
+    if rec is None:
+        _mark_playhead(session.session_key, pms, now)
+        return
+    estimated = _estimated_position(session, now)
+    if pms > estimated:
+        _mark_playhead(session.session_key, pms, now)
+        return
+    session.position_ms = estimated
+
+
+def _note_live_playhead(session, live_ms: int, now: float) -> None:
+    if session.session_key not in _live_from_player:
+        logger.info(
+            "Player timeline for %s (%s) at %dms — using the client playhead",
+            session.client_title,
+            session.client_identifier,
+            live_ms,
+        )
+        _live_from_player.add(session.session_key)
+    _mark_playhead(session.session_key, live_ms, now)
+    session.position_ms = live_ms
+
+
+async def _refresh_playhead(session, client, now: float) -> None:
+    """Prefer the player's timeline; fall back to PMS without letting it rewind."""
+    live_ms = await client.get_player_position(
+        session.client_identifier,
+        session.client_address,
+        session.client_port,
+    )
+    if live_ms is not None:
+        _note_live_playhead(session, live_ms, now)
+        return
+    _merge_pms_playhead(session, now)
+
+
+def _reap_playheads(active_session_keys: set[str]) -> None:
+    for key in [k for k in _playhead if k not in active_session_keys]:
+        del _playhead[key]
+    _live_from_player.intersection_update(active_session_keys)
 
 
 async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
@@ -41,14 +106,18 @@ async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
             client = get_client_fn()
             now = time.monotonic()
             # Full session list from PMS stays on the configured interval (5s).
-            # Tight ticks only refresh the playhead on players that are near a cue.
+            # Tight ticks keep a running playhead so we do not sit on a stale offset.
             if not sessions or (now - last_full_fetch) >= config.poll_interval:
                 sessions = await client.get_active_sessions()
                 last_full_fetch = now
                 # Drop tracking state for sessions that ended, restoring volume for
                 # any that stopped mid-mute. Plex reuses session keys, so stale
                 # entries would otherwise suppress skips for unrelated playback.
-                await filter_engine.reap({s.session_key for s in sessions}, client)
+                active = {s.session_key for s in sessions}
+                await filter_engine.reap(active, client)
+                _reap_playheads(active)
+                for session in sessions:
+                    await _refresh_playhead(session, client, now)
 
             for session in sessions:
                 user_filter = None
@@ -60,14 +129,9 @@ async def session_watcher_loop(get_config_fn, get_client_fn) -> None:
                 if user_filter is not None and not user_filter["enabled"]:
                     continue
 
+                session.position_ms = _estimated_position(session, time.monotonic())
                 if await _session_in_tight_window(session, config):
-                    live_ms = await client.get_player_position(
-                        session.client_identifier,
-                        session.client_address,
-                        session.client_port,
-                    )
-                    if live_ms is not None:
-                        session.position_ms = live_ms
+                    await _refresh_playhead(session, client, time.monotonic())
 
                 await filter_engine.process(
                     session,
@@ -139,8 +203,8 @@ async def _session_in_tight_window(session, config) -> bool:
 async def _next_poll_delay(sessions, config) -> float:
     """Return how long to sleep before the next session poll.
 
-    Stay at the configured interval (5s) until a cue is within 10s, then drop
-    to 100ms until that cue is handled or passed, then relax again.
+    Stay at the configured interval (5s) until a cue is within the approach
+    horizon, then drop to 50ms and read the player until that cue is handled.
     """
     delay = float(config.poll_interval)
     if not sessions:

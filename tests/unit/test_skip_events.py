@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -151,7 +152,7 @@ async def test_distant_segment_polls_at_the_full_interval():
 
 async def test_imminent_segment_tightens_the_poll():
     # Segment starts at 10s; with a 3s buffer the trigger is at 7s. Position 5s
-    # is inside the 10s approach window, so we drop to 100ms.
+    # is inside the approach window, so we drop to 50ms.
     await db.insert_segment("guid-poll", "Movie", 10000, 12000)
 
     delay = await watcher._next_poll_delay([_Sess(position_ms=5000)], _Cfg())
@@ -170,7 +171,7 @@ async def test_language_cue_twenty_seconds_away_stays_at_five_seconds():
 
 
 async def test_language_cue_within_ten_seconds_uses_tight_poll():
-    """A word 5s away must enter the 100ms player-poll window."""
+    """A word 5s away must enter the 50ms player-poll window."""
     await db.insert_segment(
         "guid-poll", "Movie", 10000, 10500, category="language", action="mute",
     )
@@ -180,13 +181,13 @@ async def test_language_cue_within_ten_seconds_uses_tight_poll():
     assert delay == watcher.TIGHT_POLL_INTERVAL_S
 
 
-async def test_twelve_seconds_before_a_cue_sleeps_until_the_horizon():
-    """Stay at 5s until 10s out; at 12s before trigger, sleep ~2s."""
-    # Nudity at 20s, 3s pre-buffer → trigger 17s. Horizon is 7s. Position 5s
+async def test_two_seconds_before_the_horizon_sleeps_until_it():
+    """Stay at 5s until 20s out; 2s before the horizon, sleep ~2s."""
+    # Nudity at 40s, 3s pre-buffer → trigger 37s. Horizon is 17s. Position 15s
     # is 2s before the horizon.
-    await db.insert_segment("guid-poll", "Movie", 20000, 22000)
+    await db.insert_segment("guid-poll", "Movie", 40000, 42000)
 
-    delay = await watcher._next_poll_delay([_Sess(position_ms=5000)], _Cfg())
+    delay = await watcher._next_poll_delay([_Sess(position_ms=15000)], _Cfg())
 
     assert 1.9 <= delay <= 2.1
 
@@ -220,7 +221,7 @@ async def test_just_skipped_cue_does_not_keep_tight_poll():
     )
     from cleanplex import filter_engine as fe
 
-    fe._recently_skipped["s1"] = 10800
+    fe._recently_skipped["s1"] = 10500
     try:
         delay = await watcher._next_poll_delay([_Sess(position_ms=10000)], _Cfg())
     finally:
@@ -252,3 +253,53 @@ async def test_pending_seek_keeps_tight_poll():
         fe._pending_verification.clear()
 
     assert delay == watcher.TIGHT_POLL_INTERVAL_S
+
+
+# ── Playhead interpolation ─────────────────────────────────────────────────────
+
+@pytest.fixture
+def reset_playhead():
+    watcher._playhead.clear()
+    watcher._live_from_player.clear()
+    yield
+    watcher._playhead.clear()
+    watcher._live_from_player.clear()
+
+
+def test_stale_pms_offset_does_not_rewind_the_playhead(reset_playhead):
+    session = SimpleNamespace(session_key="s1", position_ms=10000)
+    watcher._mark_playhead("s1", 15000, 100.0)
+
+    watcher._merge_pms_playhead(session, 100.5)
+
+    assert session.position_ms == 15500
+
+
+def test_pms_drop_is_ignored_as_a_stale_heartbeat(reset_playhead):
+    """A 10s-lower viewOffset is a stale PMS report, not a viewer rewind."""
+    session = SimpleNamespace(session_key="s1", position_ms=5000)
+    watcher._mark_playhead("s1", 15000, 100.0)
+
+    watcher._merge_pms_playhead(session, 101.0)
+
+    assert watcher._playhead["s1"]["pos_ms"] == 15000
+    assert session.position_ms == 16000
+
+
+def test_estimated_position_advances_from_the_last_sample(reset_playhead):
+    session = SimpleNamespace(session_key="s1", position_ms=0)
+    watcher._mark_playhead("s1", 20000, 50.0)
+
+    assert watcher._estimated_position(session, 51.0) == 21000
+
+
+def test_reap_drops_playheads_for_ended_sessions(reset_playhead):
+    watcher._mark_playhead("gone", 1, 0.0)
+    watcher._live_from_player.add("gone")
+    watcher._live_from_player.add("alive")
+    watcher._mark_playhead("alive", 2, 0.0)
+
+    watcher._reap_playheads({"alive"})
+
+    assert "gone" not in watcher._playhead
+    assert watcher._live_from_player == {"alive"}

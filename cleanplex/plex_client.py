@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-# Timeline polls run in the 100ms approach window, so a hung Apple TV must not
+# Timeline polls run in the 50ms approach window, so a hung Apple TV must not
 # block the watcher for the default 10s HTTP timeout.
 _TIMELINE_POLL_TIMEOUT_S = 0.5
 
@@ -492,7 +492,7 @@ class PlexClient:
             text = await self._direct_text(path, client_identifier, client_address, port, variant)
             return _parse_timeline_position(text or "")
 
-        # Do not re-run the seek-transport search on every 100ms tick. Use the
+        # Do not re-run the seek-transport search on every 50ms tick. Use the
         # learned path, or one proxy + one direct guess, then give up.
         if profile is not None:
             if profile.get("transport") == "direct" and client_address:

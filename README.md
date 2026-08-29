@@ -15,7 +15,7 @@ When videos are added to your Plex library, Cleanplex queues them for background
 ### 2. Real-time Playback Monitoring
 While someone watches, the service polls Plex every few seconds:
 - Checks if a filtered user's playback position enters a flagged segment
-- Polling stays at 5s until a cue is within 10s, then reads the player's live playhead every 100ms
+- Polling stays at 5s until a cue is within 20s, then reads the player's live playhead every 50ms
 - When triggered, automatically sends a seek command to jump **past the entire segment** (including scene buffers)
 - This is just a database lookup — no ML at playback time
 
@@ -101,12 +101,16 @@ All configuration is done via the **web UI** at `http://your-server:7979/setting
 2. **Monitors with a lookahead** of one poll interval — the filter triggers before the widened start to absorb polling latency
 3. **Skips to 63s**, past the full segment and its buffers
 
-Profanity / mute cues keep their authored times plus a 300ms pad. The 3s scene buffers would turn a single word into a multi-second jump.
+Profanity / mute cues keep the times in the skip file. No pad — a pad is what turned a
+0.5s word into a rewind. The seek lands on the authored end. The command is sent up to
+1s early so it can apply before the syllable.
 
-Polling stays at the configured interval (5s) until a cue is within 10 seconds, then reads the
-**player's** live playhead every 100ms until that cue is skipped or passed, then relaxes again.
-PMS session position is too stale to catch a 0.5s word. A skip that would land at or behind the
-current playhead is not sent — that rewind-after-the-word is worse than hearing it once.
+Polling stays at the configured interval (5s) until a cue is within 20 seconds, then
+reads the **player** every 50ms. The clock is `/player/timeline/poll` on the client
+(tvOS included), not PMS `viewOffset` — that offset only updates every several
+seconds. Each 5s session refresh also asks the player once, so a rewind is seen
+without waiting on PMS. A skip that would land at or behind the current playhead,
+or that fires after a short word has already started, is not sent.
 
 Every skip is verified on the next tick: a client that accepts the command without actually
 moving is recorded as a failure and re-probed.
@@ -221,7 +225,7 @@ The seek command is sent via the Plex Player Control API and works with most mod
 | Plex for iOS / Android | ✅ Fully supported |
 | Plex HTPC | ✅ Fully supported |
 | Plex Media Player (desktop) | ✅ Fully supported |
-| Apple TV | ✅ Seek supported. Mute is not — tvOS has no app volume, so those segments are skipped instead. Word skips poll the player every 100ms in the 10s before the cue so the seek can fire before the word, not after it. |
+| Apple TV | ✅ Seek supported. Mute is not — tvOS has no app volume, so those segments are skipped instead. Word skips read the app's timeline every 50ms and land on the authored end, with no pad. |
 | Roku | ⚠️ Limited support |
 | Some Smart TV apps | ⚠️ Limited support |
 
