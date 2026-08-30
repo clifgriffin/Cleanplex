@@ -42,6 +42,17 @@ beforeEach(() => {
 })
 
 describe('CategoryMatrix', () => {
+  it('labels the language slider with the VideoSkip grades', async () => {
+    mockApi.get.mockResolvedValue(customised)
+
+    render(<CategoryMatrix username="alice" enabled={true} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Including mild')).toBeInTheDocument()
+      expect(screen.getByText(/1 hell\/damn/)).toBeInTheDocument()
+    })
+  })
+
   it('renders defaults rather than blank controls for a new user', async () => {
     mockApi.get.mockResolvedValue(defaults)
 

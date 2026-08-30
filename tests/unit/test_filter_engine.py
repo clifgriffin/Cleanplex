@@ -432,6 +432,50 @@ async def test_no_prefs_filters_everything():
     client.seek.assert_awaited_once()
 
 
+async def test_teens_and_up_skips_bitch_but_not_hell():
+    """VideoSkip 1 (hell) must not fire at language level 2; grade 2 (bitch) must."""
+    client = _make_client()
+    prefs = {"language": {"level": 2, "action": ""}}
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(
+            mock_db,
+            _segs(30000, 30500, action="mute", category="language", severity="low"),
+            prefs=prefs,
+        )
+        await fe.process(_session(position_ms=30100, volume=70), client)
+
+    client.seek.assert_not_called()
+    client.set_volume.assert_not_called()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(
+            mock_db,
+            _segs(30000, 40000, action="mute", category="language", severity="medium"),
+            prefs=prefs,
+        )
+        await fe.process(_session(position_ms=35000, volume=70), client)
+
+    client.set_volume.assert_awaited()
+
+
+async def test_default_prefs_leave_mild_language_alone():
+    """No saved prefs: language defaults to teens-and-up, not including hell/damn."""
+    session = _session(position_ms=30100, volume=70)
+    client = _make_client()
+
+    with patch("cleanplex.filter_engine.db") as mock_db:
+        _mock_db(
+            mock_db,
+            _segs(30000, 30500, action="mute", category="language", severity="low"),
+            prefs={},
+        )
+        await fe.process(session, client)
+
+    client.seek.assert_not_called()
+    client.set_volume.assert_not_called()
+
+
 async def test_high_level_skips_low_severity_segment():
     session = _session(position_ms=35000)
     client = _make_client()

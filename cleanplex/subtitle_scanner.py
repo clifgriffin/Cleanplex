@@ -42,6 +42,34 @@ DEFAULT_WORDLIST = [
     "wanker", "whore",
 ]
 
+# VideoSkip / skp-forge grades: 1 children (low), 2 teens (medium), 3 adults (high).
+# Unlisted stems stay high so a custom wordlist cannot accidentally become mild.
+_WORD_SEVERITY = {
+    "damn": "low", "goddamn": "low", "hell": "low", "ass": "low", "crap": "low",
+    "shit": "medium", "bullshit": "medium", "bitch": "medium", "bastard": "medium",
+    "piss": "medium", "dick": "medium", "dickhead": "medium", "asshole": "medium",
+    "prick": "medium", "cock": "medium", "twat": "medium", "wank": "medium",
+    "wanker": "medium", "arse": "medium", "arsehole": "medium", "slut": "medium",
+    "whore": "medium", "jackass": "medium", "bollocks": "medium",
+    "fuck": "high", "motherfucker": "high", "cunt": "high", "fag": "high",
+    "faggot": "high", "nigger": "high", "nigga": "high", "retard": "high",
+    "dyke": "high",
+}
+_SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
+
+
+def severity_for_word(word: str) -> str:
+    """Return the VideoSkip grade for a matched token, preferring the longest stem."""
+    token = (word or "").strip().lower()
+    if not token:
+        return "high"
+    if token in _WORD_SEVERITY:
+        return _WORD_SEVERITY[token]
+    stems = [stem for stem in _WORD_SEVERITY if token.startswith(stem)]
+    if not stems:
+        return "high"
+    return _WORD_SEVERITY[max(stems, key=len)]
+
 # Matches a listed word plus optional doubled consonant and common suffixes, so
 # "shitting" and "fucked" are caught while "class" is not mistaken for a stem.
 _SUFFIX_PATTERN = r"(?:[a-z])?(?:s|es|d|ed|ing|er|ers|y)?"
@@ -93,7 +121,7 @@ def find_hits(cues: list[dict], pattern: re.Pattern) -> list[dict]:
             "start_ms": max(0, cue["start_ms"] - PAD_MS),
             "end_ms": cue["end_ms"] + PAD_MS,
             "category": "language",
-            "severity": "high",
+            "severity": severity_for_word(match.group(0)),
             "action": "mute",
             "channel": "audio",
             "labels": match.group(0).lower(),
@@ -108,6 +136,9 @@ def find_hits(cues: list[dict], pattern: re.Pattern) -> list[dict]:
             existing = merged[-1]["labels"].split(",")
             if hit["labels"] not in existing:
                 merged[-1]["labels"] = ",".join(existing + [hit["labels"]])
+            # A burst inherits the strongest word, matching skp-forge merge.
+            if _SEVERITY_RANK[hit["severity"]] > _SEVERITY_RANK[merged[-1]["severity"]]:
+                merged[-1]["severity"] = hit["severity"]
         else:
             merged.append(hit)
     return merged

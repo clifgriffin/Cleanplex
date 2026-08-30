@@ -10,13 +10,15 @@ pytestmark = pytest.mark.usefixtures("setup_db")
 
 
 async def test_new_user_renders_at_the_inherited_defaults(http_client):
-    """No stored prefs means 'filter everything', so controls show full strictness."""
+    """No stored prefs: language is teens-and-up; every other category is full."""
     resp = await http_client.get("/api/users/alice/categories")
     body = resp.json()
+    levels = {c["category"]: c["level"] for c in body["categories"]}
 
     assert resp.status_code == 200
     assert body["uses_defaults"] is True
-    assert all(c["level"] == 3 for c in body["categories"])
+    assert levels["language"] == 2
+    assert all(level == 3 for name, level in levels.items() if name != "language")
 
 
 async def test_stored_prefs_are_returned(http_client):

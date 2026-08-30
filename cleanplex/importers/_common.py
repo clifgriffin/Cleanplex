@@ -23,6 +23,13 @@ SEVERITIES = ("low", "medium", "high")
 ACTIONS = ("skip", "mute", "blank", "blur", "fast")
 CHANNELS = ("both", "video", "audio")
 
+# VideoSkip / skp-forge grade words 1–3 (children / teens / adults). Our slider
+# is the same scale. Language defaults to 2 so mild words (hell, damn, ass) stay
+# audible; other categories stay at 3.
+def default_viewer_level(category: str) -> int:
+    """Return the default 0–3 filter level for a category with no saved prefs."""
+    return 2 if category == "language" else 3
+
 _TIME_RE = re.compile(r"^\d+(:\d{1,2}){0,2}([.,]\d+)?$")
 
 

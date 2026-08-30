@@ -15,10 +15,9 @@ interface CategoriesResponse {
   categories: CategoryPref[]
 }
 
-// Levels follow the threshold model the filter engine uses: a segment fires when
-// the viewer's level plus its severity rank exceeds 3. Labelling them by what
-// they let through is far clearer than showing the raw number.
-const LEVEL_LABELS = ['Off', 'Severe only', 'Moderate and up', 'Everything']
+// Same 0–3 scale as VideoSkip / skp-forge: a segment fires when viewer level
+// plus content grade (1 children / 2 teens / 3 adults) exceeds 3.
+const LEVEL_LABELS = ['Off', 'Adults only', 'Teens and up', 'Including mild']
 
 const CATEGORY_LABELS: Record<string, string> = {
   commercial: 'Commercials',
@@ -111,7 +110,7 @@ export default function CategoryMatrix({ username, enabled }: Props) {
           <p className="text-sm font-medium text-gray-200">Category filtering</p>
           <p className="text-xs text-gray-500 mt-0.5">
             {data.uses_defaults
-              ? 'Using defaults: everything is filtered.'
+              ? 'Using defaults: teen-and-up profanity, everything else.'
               : 'Customised for this user.'}
             {!enabled && ' Filtering is off for this user.'}
           </p>
@@ -135,6 +134,11 @@ export default function CategoryMatrix({ username, enabled }: Props) {
               <p className="text-sm text-gray-200">
                 {CATEGORY_LABELS[cat.category] ?? cat.category}
               </p>
+              {cat.category === 'language' && (
+                <p className="text-[11px] text-gray-600 mt-0.5">
+                  1 hell/damn · 2 bitch/shit · 3 f-words
+                </p>
+              )}
               {!cat.has_segments && (
                 <p className="text-[11px] text-gray-600 mt-0.5">No segments yet</p>
               )}
@@ -151,7 +155,7 @@ export default function CategoryMatrix({ username, enabled }: Props) {
                 onChange={e => update(cat.category, Number(e.target.value), cat.action)}
                 className="flex-1 accent-plex-orange"
               />
-              <span className="text-xs text-gray-500 w-32">{LEVEL_LABELS[cat.level]}</span>
+              <span className="text-xs text-gray-500 w-36">{LEVEL_LABELS[cat.level]}</span>
             </div>
 
             {/* Action override. Only skip and mute are possible through the Plex

@@ -6,6 +6,7 @@ import time
 
 from .logger import get_logger
 from . import database as db
+from .importers._common import default_viewer_level
 from .plex_client import ActiveSession, PlexClient
 
 logger = get_logger(__name__)
@@ -185,14 +186,16 @@ def _matches_language(segment: dict, audio_language: str) -> bool:
 
 def _is_filtered(segment: dict, prefs: dict[str, dict]) -> bool:
     """Return True if this segment should be acted on for a viewer with these prefs."""
+    category = segment.get("category") or "other"
     if not prefs:
-        # No stored preferences: filter everything, matching pre-category behaviour.
-        return True
-    pref = prefs.get(segment.get("category") or "other")
-    if pref is None:
-        return False
+        level = default_viewer_level(category)
+    else:
+        pref = prefs.get(category)
+        if pref is None:
+            return False
+        level = pref["level"]
     rank = _SEVERITY_RANK.get(segment.get("severity") or "high", 3)
-    return (pref["level"] + rank) > 3
+    return (level + rank) > 3
 
 
 def _resolve_action(segment: dict, prefs: dict[str, dict]) -> str:

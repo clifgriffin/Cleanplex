@@ -69,6 +69,14 @@ def test_listed_word_produces_a_padded_mute_segment():
     assert hits[0]["action"] == "mute"
     assert hits[0]["category"] == "language"
     assert hits[0]["channel"] == "audio"
+    assert hits[0]["severity"] == "medium"
+
+
+def test_word_severity_follows_skp_forge_grades():
+    assert ss.severity_for_word("hell") == "low"
+    assert ss.severity_for_word("damn") == "low"
+    assert ss.severity_for_word("shitting") == "medium"
+    assert ss.severity_for_word("fucking") == "high"
 
 
 def test_suffixed_forms_are_matched():

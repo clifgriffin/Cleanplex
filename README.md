@@ -125,9 +125,11 @@ Segments carry a **category** (nudity, sex, violence, language, drugs, fear, com
 | `skip` | Seeks past the segment |
 | `mute` | Drops the volume for the segment and restores it after — used for profanity. Clients with no software volume (Apple TV) skip instead |
 
-Each user gets a 0–3 level per category. A segment fires when *level + severity* exceeds 3, so
-level 3 filters everything in that category and level 0 filters nothing. Users with no saved
-preferences have everything filtered, matching the previous behaviour.
+Each user gets a 0–3 level per category. A segment fires when *level + severity* exceeds 3.
+VideoSkip / skp-forge grade words the same way: **1** mild (`hell`, `damn`, `ass`), **2** teen
+(`bitch`, `shit`), **3** adult (`fuck`). The slider labels match that scale — **Teens and up**
+skips 2 and 3, and leaves mild words alone. Language defaults to teens-and-up; other categories
+default to filtering everything. Level 0 filters nothing.
 
 `blank` and `blur` appear in some imported files but are **not supported**: Plex exposes playback
 position and volume, not the video stream. Those segments are logged and ignored rather than

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from ...logger import get_logger
 import cleanplex.plex_client as plex_mod
 from ... import database as db
-from ...importers._common import CATEGORIES
+from ...importers._common import CATEGORIES, default_viewer_level
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -73,13 +73,14 @@ async def get_user_categories(username: str):
 
     return {
         "username": username,
-        # An empty prefs map means "filter everything", which is the pre-category
-        # default; the UI renders that rather than blank controls.
+        # An empty prefs map uses default_viewer_level (teen+ language, else 3).
         "uses_defaults": not prefs,
         "categories": [
             {
                 "category": name,
-                "level": prefs.get(name, {}).get("level", 3 if not prefs else 0),
+                "level": prefs.get(name, {}).get(
+                    "level", default_viewer_level(name) if not prefs else 0
+                ),
                 "action": prefs.get(name, {}).get("action", ""),
                 "has_segments": name in populated,
             }

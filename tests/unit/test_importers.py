@@ -99,6 +99,26 @@ def test_skp_parenthetical_comment_does_not_change_the_action():
     assert segments[0]["action"] == "skip"
 
 
+def test_skp_forge_word_digits_match_videoskip_grades():
+    """skp-forge writes 'profanity word N (token)' using VideoSkip 1/2/3."""
+    text = (
+        "Title | 3 mutes | mms\n\n"
+        "0:01:45.20 --> 0:01:45.70\n"
+        "profanity word 1 (hell)\n\n"
+        "0:37:19.07 --> 0:37:19.58\n"
+        "profanity word 2 (bitch)\n\n"
+        "1:00:00.00 --> 1:00:00.40\n"
+        "profanity word 3 (fuck)\n"
+    )
+    segments = skp.parse(text)
+    by_word = {s["labels"]: s["severity"] for s in segments}
+
+    assert by_word["profanity word 1 (hell)"] == "low"
+    assert by_word["profanity word 2 (bitch)"] == "medium"
+    assert by_word["profanity word 3 (fuck)"] == "high"
+    assert all(s["action"] == "mute" and s["category"] == "language" for s in segments)
+
+
 def test_skp_missing_severity_digit_defaults_to_low():
     segments = skp.parse("0:00:10 --> 0:00:20\nnudity\n")
 
