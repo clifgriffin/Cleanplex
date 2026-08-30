@@ -733,6 +733,11 @@ async def scan_video(plex_guid: str, config) -> None:
 
         await db.update_scan_job_status(plex_guid, "done", progress=1.0)
 
+        # Opt-in only. Playback already no-ops when a title has no stored segments.
+        if getattr(config, "auto_scan_subtitles", False):
+            from . import subtitle_scanner
+            segments_inserted += await subtitle_scanner.scan_title(plex_guid, title, file_path)
+
         if rating_key:
             try:
                 client = plex_mod.get_client()

@@ -104,3 +104,34 @@ async def test_malformed_sidecar_falls_back_to_ml_scan(tmp_path, caplog):
     detector.assert_called_once()
     assert "using normal scan handling" in caplog.text
     assert (await db.get_scan_job_by_guid("guid-side"))["status"] == "done"
+
+
+async def _ml_scan(tmp_path, config: Config) -> AsyncMock:
+    """Run scan_video through the NudeNet path with subtitle scanning mocked."""
+    media = tmp_path / "movie.mkv"
+    media.write_text("x", encoding="utf-8")
+    await _job(str(media))
+    await db.set_force_scan("guid-side", True)
+
+    async def frames(*_args):
+        yield 0, b"jpeg"
+
+    with (
+        patch.object(scanner, "get_duration_ms", new=AsyncMock(return_value=1000)),
+        patch.object(scanner, "extract_frames_batch", new=frames),
+        patch.object(scanner, "_classify_frame", return_value=(False, 0.0, [])),
+        patch.object(scanner, "THUMBNAILS_DIR", tmp_path / "thumbs"),
+        patch("cleanplex.subtitle_scanner.scan_title", new=AsyncMock(return_value=0)) as scan_subs,
+    ):
+        await scanner.scan_video("guid-side", config)
+    return scan_subs
+
+
+async def test_scan_video_does_not_scan_subtitles_by_default(tmp_path):
+    scan_subs = await _ml_scan(tmp_path, Config())
+    scan_subs.assert_not_awaited()
+
+
+async def test_scan_video_scans_subtitles_when_enabled(tmp_path):
+    scan_subs = await _ml_scan(tmp_path, Config(auto_scan_subtitles=True))
+    scan_subs.assert_awaited_once()

@@ -11,6 +11,7 @@ interface Settings {
   scan_step_ms: string
   scan_workers: string
   auto_scan_new_titles: string
+  auto_scan_subtitles: string
   nudenet_model: string
   nudenet_model_path: string
   segment_gap_ms: string
@@ -48,6 +49,7 @@ const DEFAULT: Settings = {
   scan_step_ms: '5000',
   scan_workers: '2',
   auto_scan_new_titles: 'true',
+  auto_scan_subtitles: 'false',
   nudenet_model: '320n',
   nudenet_model_path: '',
   segment_gap_ms: '12000',
@@ -362,6 +364,20 @@ export default function SettingsPage() {
             </label>
             <p className="text-xs text-gray-600 mt-1">
               When you turn off this setting, Cleanplex finds new Plex titles but does not add them to the ML scan queue. Sidecar imports and Scan Now still work.
+            </p>
+          </div>
+          <div>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.auto_scan_subtitles === 'true'}
+                onChange={e => setForm(f => ({ ...f, auto_scan_subtitles: String(e.target.checked) }))}
+                className="w-4 h-4 accent-plex-orange"
+              />
+              <span className="text-sm font-medium text-gray-300">Automatically scan subtitles for profanity</span>
+            </label>
+            <p className="text-xs text-gray-600 mt-1">
+              Off by default. Playback only filters titles that already have segments loaded. Turn this on if you want a requested ML scan to also read subtitles and store mute cues.
             </p>
           </div>
           <Field label="NudeNet Model" hint="320n is bundled and fastest. 640m is downloaded by Cleanplex automatically and then cached locally.">

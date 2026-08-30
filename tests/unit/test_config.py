@@ -22,6 +22,7 @@ async def test_config_load_returns_defaults():
     assert config.skip_buffer_ms == 3000
     assert config.scan_workers == 2
     assert config.auto_scan_new_titles is True
+    assert config.auto_scan_subtitles is False
     assert config.log_level == "INFO"
 
 
@@ -62,6 +63,12 @@ async def test_config_load_disables_automatic_scanning():
     await db.set_setting("auto_scan_new_titles", "false")
     config = await Config.load()
     assert config.auto_scan_new_titles is False
+
+
+async def test_config_load_enables_automatic_subtitle_scanning():
+    await db.set_setting("auto_scan_subtitles", "true")
+    config = await Config.load()
+    assert config.auto_scan_subtitles is True
 
 
 # ── is_configured ──────────────────────────────────────────────────────────────

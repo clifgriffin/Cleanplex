@@ -47,6 +47,7 @@ class SettingsPayload(BaseModel):
     scan_step_ms: str | None = None
     scan_workers: str | None = None
     auto_scan_new_titles: str | None = None
+    auto_scan_subtitles: str | None = None
     nudenet_model: str | None = None
     nudenet_model_path: str | None = None
     segment_gap_ms: str | None = None

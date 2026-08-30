@@ -203,6 +203,8 @@ DEFAULT_SETTINGS = {
     "scan_step_ms": "5000",
     "scan_workers": "2",
     "auto_scan_new_titles": "true",
+    # Off: playback only uses stored segments (import / sidecar / requested scan).
+    "auto_scan_subtitles": "false",
     "segment_gap_ms": "12000",
     "segment_min_hits": "1",
     "scan_window_start": "23:00",

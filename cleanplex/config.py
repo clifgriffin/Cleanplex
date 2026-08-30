@@ -21,6 +21,7 @@ class Config:
     scan_step_ms: int = 5000
     scan_workers: int = 2
     auto_scan_new_titles: bool = True
+    auto_scan_subtitles: bool = False
     nudenet_model: str = "320n"
     nudenet_model_path: str = ""
     segment_gap_ms: int = 12000
@@ -69,6 +70,8 @@ class Config:
             scan_workers=max(1, int(s.get("scan_workers", "2"))),
             auto_scan_new_titles=s.get("auto_scan_new_titles", "true").strip().lower()
             not in {"0", "false", "no", "off"},
+            auto_scan_subtitles=s.get("auto_scan_subtitles", "false").strip().lower()
+            not in {"0", "false", "no", "off", ""},
             nudenet_model=s.get("nudenet_model", "320n"),
             nudenet_model_path=s.get("nudenet_model_path", ""),
             segment_gap_ms=int(s.get("segment_gap_ms", "12000")),

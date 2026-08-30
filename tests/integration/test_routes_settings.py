@@ -51,6 +51,21 @@ async def test_update_settings_writes_automatic_scan_setting(http_client):
     assert await db.get_setting("auto_scan_new_titles") == "false"
 
 
+async def test_get_settings_defaults_subtitle_scanning_off(http_client):
+    resp = await http_client.get("/api/settings")
+    assert resp.status_code == 200
+    assert resp.json()["auto_scan_subtitles"] == "false"
+
+
+async def test_update_settings_writes_automatic_subtitle_scan_setting(http_client):
+    resp = await http_client.put(
+        "/api/settings",
+        json={"auto_scan_subtitles": "true"},
+    )
+    assert resp.status_code == 200
+    assert await db.get_setting("auto_scan_subtitles") == "true"
+
+
 async def test_update_settings_ignores_none_fields(http_client):
     await db.set_setting("poll_interval", "5")
     with patch("cleanplex.web.routes.settings.scan_mod.request_scanner_restart", new=AsyncMock()):

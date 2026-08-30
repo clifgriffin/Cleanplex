@@ -88,6 +88,21 @@ describe('Settings', () => {
     })
   })
 
+  it('leaves automatic subtitle scanning off and can turn it on', async () => {
+    renderSettings()
+    const checkbox = await screen.findByRole('checkbox', { name: 'Automatically scan subtitles for profanity' })
+    expect(checkbox).not.toBeChecked()
+
+    fireEvent.click(checkbox)
+    expect(checkbox).toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalledWith(
+      '/api/settings',
+      expect.objectContaining({ auto_scan_subtitles: 'true' }),
+    ))
+  })
+
   it('enables automatic scans by default and saves checkbox changes', async () => {
     renderSettings()
     const checkbox = await screen.findByRole('checkbox', { name: 'Automatically scan newly discovered titles' })

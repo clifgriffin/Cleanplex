@@ -91,6 +91,17 @@ async def test_discovery_keeps_rating_filtered_title_visible_but_not_queued(tmp_
     enqueue.assert_not_awaited()
 
 
+async def test_discovery_does_not_scan_subtitles(tmp_path):
+    media = tmp_path / "movie.mkv"
+    media.write_bytes(b"")
+
+    with patch("cleanplex.subtitle_scanner.scan_title", new=AsyncMock()) as scan_subs:
+        await _discover(_item(str(media)), auto_scan=True)
+
+    scan_subs.assert_not_awaited()
+    assert await db.get_segments_for_guid("guid-new") == []
+
+
 async def test_discovery_imports_sidecar_when_automatic_scanning_is_disabled(tmp_path):
     media = tmp_path / "movie.mkv"
     media.write_bytes(b"")

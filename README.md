@@ -91,6 +91,7 @@ All configuration is done via the **web UI** at `http://your-server:7979/setting
 | Scan Window | 23:00–06:00 | Time window when background scanning runs |
 | Scanner Workers | 2 | Number of parallel scans (higher = more CPU/memory usage) |
 | Automatically scan newly discovered titles | On | When off, Cleanplex adds new titles to the Library but does not queue an ML scan. Sidecar and manual scans still work. |
+| Automatically scan subtitles for profanity | Off | When off, Cleanplex does not read subtitles to invent language cues. Playback only filters titles that already have segments loaded. |
 | Detector Labels | — | Select which nudity types to detect (and skip). Only selected labels trigger skips |
 | Content Ratings | — | Only scan and filter titles matching your selected ratings |
 
@@ -162,9 +163,12 @@ Plex itself does not read `.edl` files, so EDL/MCF export is for Kodi, Jellyfin 
 
 ## Profanity Filtering
 
-Subtitles are scanned against a configurable wordlist and matching lines become **muted** segments —
-no frames, no inference, seconds per title. Matching uses word boundaries with suffix handling, so
-"shitting" is caught while "classic" is not.
+Cleanplex does **not** automatically scan subtitles. A playing title is filtered only when it
+already has segments loaded — an imported skip file, a sidecar picked up on first discovery, or a
+scan you requested.
+
+The subtitle wordlist scanner is opt-in (Settings, or `POST /api/segments/scan-subtitles`). Matching
+uses word boundaries with suffix handling, so "shitting" is caught while "classic" is not.
 
 Because the timings come from one audio track, these segments are tagged with that track's language
 and only fire when it is the one playing; a dubbed track is left alone rather than muted in the
@@ -212,6 +216,7 @@ only. Those categories are populated by importing skip files, where humans have 
 - **Plex connection** — Server URL and authentication token
 - **Scanner tuning** — Frame extraction interval, confidence threshold, parallel workers
 - **Automatic scanning** — Choose if new titles enter the background ML scan queue
+- **Automatic subtitle scanning** — Off by default. Playback only filters titles with loaded segments
 - **Rating filter** — Only scan titles matching your selected content ratings (exact match, "Unrated" is explicit)
 - **Detector labels** — Checkboxes to select which nudity types trigger skips (e.g., "female genitalia", "male genitalia", "breast", "butt", "anus")
 - **Skip behavior** — Pre/post buffers around segments, scan window, segment merge gap, minimum hits per segment
