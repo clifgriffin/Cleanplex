@@ -75,6 +75,8 @@ def test_listed_word_produces_a_padded_mute_segment():
 def test_word_severity_follows_skp_forge_grades():
     assert ss.severity_for_word("hell") == "low"
     assert ss.severity_for_word("damn") == "low"
+    assert ss.severity_for_word("goddamn") == "medium"
+    assert ss.severity_for_word("goddamned") == "medium"
     assert ss.severity_for_word("shitting") == "medium"
     assert ss.severity_for_word("fucking") == "high"
 

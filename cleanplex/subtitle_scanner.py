@@ -45,8 +45,9 @@ DEFAULT_WORDLIST = [
 # VideoSkip / skp-forge grades: 1 children (low), 2 teens (medium), 3 adults (high).
 # Unlisted stems stay high so a custom wordlist cannot accidentally become mild.
 _WORD_SEVERITY = {
-    "damn": "low", "goddamn": "low", "hell": "low", "ass": "low", "crap": "low",
+    "damn": "low", "hell": "low", "ass": "low", "crap": "low",
     "shit": "medium", "bullshit": "medium", "bitch": "medium", "bastard": "medium",
+    "goddamn": "medium",
     "piss": "medium", "dick": "medium", "dickhead": "medium", "asshole": "medium",
     "prick": "medium", "cock": "medium", "twat": "medium", "wank": "medium",
     "wanker": "medium", "arse": "medium", "arsehole": "medium", "slut": "medium",

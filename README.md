@@ -126,8 +126,8 @@ Segments carry a **category** (nudity, sex, violence, language, drugs, fear, com
 | `mute` | Drops the volume for the segment and restores it after — used for profanity. Clients with no software volume (Apple TV) skip instead |
 
 Each user gets a 0–3 level per category. A segment fires when *level + severity* exceeds 3.
-VideoSkip / skp-forge grade words the same way: **1** mild (`hell`, `damn`, `ass`), **2** teen
-(`bitch`, `shit`), **3** adult (`fuck`). The slider labels match that scale — **Teens and up**
+Words are graded **1** mild (`hell`, `damn`, `ass`), **2** teen (`bitch`, `shit`, `goddamn`),
+**3** adult (`fuck`). The slider labels match that scale — **Teens and up**
 skips 2 and 3, and leaves mild words alone. Language defaults to teens-and-up; other categories
 default to filtering everything. Level 0 filters nothing.
 
